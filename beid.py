@@ -72,9 +72,9 @@ def read_infos(self, read_photo=False):
                 infos.append(u"")
         informations = {
     "num_carte" : infos[0],
-    "date_debut" : datetime.strptime(infos[2],"%d.%m.%Y"),
-    "date_fin" : datetime.strptime(infos[3],"%d.%m.%Y"),
-    "lieu_delivrance" : infos[4],
+    "debut_val" : datetime.strptime(infos[2],"%d.%m.%Y"),
+    "fin_val" : datetime.strptime(infos[3],"%d.%m.%Y"),
+    "commune_delivrance" : infos[4],
     "num_nat" : infos[5],
     "nom" : infos[6],
     "prenoms" : infos[7],
