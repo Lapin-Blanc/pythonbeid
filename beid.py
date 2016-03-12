@@ -37,23 +37,23 @@ PHOTO = [0x3F, 0x00, 0xDF, 0x01, 0x40, 0x35]
 
 def read_infos(self, read_photo=False):
 
-    def _sendADPU(self, apdu):
-        response, sw1, sw2 = self._cnx.transmit(apdu)
+    def _sendADPU(apdu):
+        response, sw1, sw2 = _cnx.transmit(apdu)
         return response, sw1, sw2
 
-    self._cnx = self.createConnection()
-    self._cnx.connect()
+    _cnx = self.createConnection()
+    _cnx.connect()
     # select file : informations
     # TODO : manage return codes
     cmd = [0x00, 0xA4, 0x08, 0x0C, len(ID)] + ID        
-    data, sw1, sw2 = _sendADPU(self, cmd)
+    data, sw1, sw2 = _sendADPU(cmd)
 
     # read file
     cmd = [0x00, 0xB0, 0x00, 0x00, 256]
-    data, sw1, sw2 = _sendADPU(self, cmd)
+    data, sw1, sw2 = _sendADPU(cmd)
     if "%x"%sw1 == "6c":
         cmd = [0x00, 0xB0, 0x00, 0x00, sw2]
-        data, sw1, sw2 = _sendADPU(self, cmd)
+        data, sw1, sw2 = _sendADPU(cmd)
         idx = 0
         num_info = 0
         infos = []
@@ -87,14 +87,14 @@ def read_infos(self, read_photo=False):
 
     # select file : adresse
     cmd = [0x00, 0xA4, 0x08, 0x0C, len(ADDRESS)] + ADDRESS
-    data, sw1, sw2 = _sendADPU(self, cmd)
+    data, sw1, sw2 = _sendADPU(cmd)
 
     # read file
     cmd = [0x00, 0xB0, 0x00, 0x00, 256]
-    data, sw1, sw2 = _sendADPU(self, cmd)
+    data, sw1, sw2 = _sendADPU(cmd)
     if "%x"%sw1 == "6c":
         cmd = [0x00, 0xB0, 0x00, 0x00, sw2]
-        data, sw1, sw2 = _sendADPU(self, cmd)
+        data, sw1, sw2 = _sendADPU(cmd)
         idx = 0
         num_info = 0
         infos = []
@@ -119,20 +119,20 @@ def read_infos(self, read_photo=False):
     if read_photo:
         # select file : photo
         cmd = [0x00, 0xA4, 0x08, 0x0C, len(PHOTO)] + PHOTO
-        data, sw1, sw2 = _sendADPU(self, cmd)
+        data, sw1, sw2 = _sendADPU(cmd)
 
         photo_bytes = []
 
         offset = 0
         while "%x"%sw1 == "90":
             cmd = [0x00, 0xB0, offset, 0x00, 256]
-            data, sw1, sw2 = _sendADPU(self, cmd)
+            data, sw1, sw2 = _sendADPU(cmd)
             photo_bytes += data
             offset += 1
         if "%x"%sw1 == "6c":
             offset -= 1
             cmd = [0x00, 0xB0, offset, 0x00, sw2]
-            data, sw1, sw2 = _sendADPU(self, cmd)
+            data, sw1, sw2 = _sendADPU(cmd)
             photo_bytes += data
             
         photo = bytearray(photo_bytes)
@@ -148,8 +148,8 @@ class BeidReader(CardObserver):
     def __init__(self, num_reader=0):
         self._reader = readers()[num_reader]
         self._readername = self._reader.name
-        self._cm = CardMonitor()
-        self._cm.addObserver(self)
+        cm = CardMonitor()
+        cm.addObserver(self)
         self.card = None
 
     def update(self, observable, actions):
@@ -166,13 +166,27 @@ class BeidReader(CardObserver):
                 self.on_removed()
 
     def on_inserted(self, card):
-        print("Added : ", card)
+        print("Card inserted : ", card)
 
     def on_removed(self):
-        print("Card removed : ")
+        print("Card removed")
 
     def __repr__(self):
         return self._reader.__repr__()
 
     def __str__(self):
         return self._reader.__str__()
+
+if __name__ == "__main__":
+
+    from pprint import pprint
+
+    class MyReader(BeidReader):
+        def on_inserted(self, card):
+            pprint(card.read_infos())
+        def on_removed(self):
+            print("This is the end !")
+    
+    my = MyReader()
+
+    input("Press ENTER to exit...\n")
