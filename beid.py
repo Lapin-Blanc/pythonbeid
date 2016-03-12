@@ -1,7 +1,11 @@
+#/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 from smartcard.CardMonitoring import CardObserver, CardMonitor
 from smartcard.System import readers
 import smartcard
 from types import MethodType
+from datetime import datetime
 
 MAP_MOIS = {
     "JANV" : "01",
@@ -68,8 +72,8 @@ def read_infos(self, read_photo=False):
                 infos.append(u"")
         informations = {
     "num_carte" : infos[0],
-    "date_debut" : infos[2].replace(".","/"),
-    "date_fin" : infos[3].replace(".","/"),
+    "date_debut" : datetime.strptime(infos[2],"%d.%m.%Y"),
+    "date_fin" : datetime.strptime(infos[3],"%d.%m.%Y"),
     "lieu_delivrance" : infos[4],
     "num_nat" : infos[5],
     "nom" : infos[6],
@@ -77,7 +81,7 @@ def read_infos(self, read_photo=False):
     "suffixe" : infos[8],
     "nationalite" : infos[9],
     "lieu_naissance" : infos[10],
-    "date_naissance" : infos[11].split()[0] + "/" + MAP_MOIS[infos[11].split()[1]] + "/" + infos[11].split()[2],
+    "date_naissance" : datetime.strptime(infos[11].split()[0] + "/" + MAP_MOIS[infos[11].split()[1]] + "/" + infos[11].split()[2],"%d/%m/%Y"),
     "sexe" : infos[12],
     }
 
