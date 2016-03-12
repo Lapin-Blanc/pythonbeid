@@ -29,7 +29,8 @@ Btw, for pyscard to install and work correctly with Python 3 (at least in Raspbi
     class MyReader(BeidReader):
         def on_inserted(self, card):
             pprint(card.read_infos())
+
     my_reader = MyReader()
 
-    print my_reader.card.num_carte
-    print my_reader.card.num_nat
+    print(my_reader.card.num_carte)
+    print(my_reader.card.num_nat)
