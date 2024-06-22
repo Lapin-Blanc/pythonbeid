@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="pythonbeid",
-    version="0.1.0",
+    version="0.1.1",
     author="Fabien Toune",
     author_email="fabien.toune@gmail.com",
     description="Un module pour lire les informations des cartes d'identité belges",
