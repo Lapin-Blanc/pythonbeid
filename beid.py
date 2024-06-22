@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""
+Card Reader Script
+
+This script reads information from a smart card using a card reader. It can retrieve card information, address, and optionally photo data.
+
+Dependencies:
+- pyscard (python-smartcard)
+
+Usage:
+    Run the script and it will attempt to read the card information and print it.
+
+Author:
+    Your Name (youremail@example.com)
+"""
 
 from datetime import datetime
 from pprint import pprint
@@ -26,7 +40,19 @@ ADDRESS = [0x3F, 0x00, 0xDF, 0x01, 0x40, 0x33]
 PHOTO = [0x3F, 0x00, 0xDF, 0x01, 0x40, 0x35]
 
 class CardReader:
+    """
+    A class to read information from a smart card using a card reader.
+    
+    Methods
+    -------
+    read_informations(photo=False)
+        Reads card information, including optional photo data.
+    """
+
     def __init__(self) -> None:
+        """
+        Initializes the CardReader by connecting to the first available card reader.
+        """
         try:
             self._cnx = readers()[0].createConnection()
             self._cnx.connect()
@@ -38,10 +64,36 @@ class CardReader:
             raise RuntimeError(f"Erreur de connexion à la carte: {e}")
 
     def _send_apdu(self, apdu):
+        """
+        Sends an APDU command to the card and returns the response.
+        
+        Parameters
+        ----------
+        apdu : list
+            The APDU command to send.
+        
+        Returns
+        -------
+        tuple
+            The response data, SW1, and SW2 status bytes.
+        """
         response, sw1, sw2 = self._cnx.transmit(apdu)
         return response, sw1, sw2
 
     def _read_data(self, file_id):
+        """
+        Reads data from the card file specified by the file_id.
+        
+        Parameters
+        ----------
+        file_id : list
+            The file identifier to select and read.
+        
+        Returns
+        -------
+        tuple
+            The data read from the file, SW1, and SW2 status bytes.
+        """
         cmd = [0x00, 0xA4, 0x08, 0x0C, len(file_id)] + file_id
         _, sw1, sw2 = self._send_apdu(cmd)
         if sw1 == 0x6C:
@@ -55,6 +107,21 @@ class CardReader:
         return data, sw1, sw2
 
     def _parse_information(self, data, num_info_limit):
+        """
+        Parses the information from the raw data read from the card.
+        
+        Parameters
+        ----------
+        data : list
+            The raw data read from the card.
+        num_info_limit : int
+            The number of information fields to parse.
+        
+        Returns
+        -------
+        list
+            The parsed information fields as strings.
+        """
         idx = 0
         infos = []
         while len(infos) <= num_info_limit:
@@ -71,11 +138,37 @@ class CardReader:
         return infos
 
     def _parse_date(self, date_str):
+        """
+        Parses a date string in the format 'DD MON YYYY'.
+        
+        Parameters
+        ----------
+        date_str : str
+            The date string to parse.
+        
+        Returns
+        -------
+        datetime
+            The parsed date as a datetime object.
+        """
         jour, mois, annee = date_str.split()
         mois = MAP_MOIS.get(mois, "01")
         return datetime.strptime(f"{jour}/{mois}/{annee}", "%d/%m/%Y")
 
     def read_informations(self, photo=False):
+        """
+        Reads and returns the card information, including optional photo data.
+        
+        Parameters
+        ----------
+        photo : bool, optional
+            Whether to read the photo data (default is False).
+        
+        Returns
+        -------
+        dict
+            The card information including number, validity dates, personal details, and optionally the photo.
+        """
         data, sw1, sw2 = self._read_data(ID)
         infos = self._parse_information(data, 12)
 
@@ -111,6 +204,14 @@ class CardReader:
         return informations
 
     def _read_photo(self):
+        """
+        Reads the photo data from the card.
+        
+        Returns
+        -------
+        bytearray
+            The photo data as a bytearray.
+        """
         data, sw1, sw2 = self._read_data(PHOTO)
         photo_bytes = []
         offset = 0
