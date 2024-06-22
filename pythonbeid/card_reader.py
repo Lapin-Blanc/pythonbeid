@@ -14,7 +14,7 @@ Usage:
 Author:
     Your Name (youremail@example.com)
 """
-
+import base64
 from datetime import datetime
 from pprint import pprint
 from smartcard.System import readers
@@ -196,7 +196,8 @@ class CardReader:
 
         if photo:
             photo_data = self._read_photo()
-            informations["photo"] = photo_data
+            base64_encoded = base64.b64encode(photo_data)
+            informations["photo"] = base64_encoded.decode('utf-8')
 
         for attribute, value in informations.items():
             setattr(self, attribute, value)
