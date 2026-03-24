@@ -28,16 +28,11 @@ def parse_tlv(data: list[int], num_fields: int) -> list[str]:
     Parsing stops once *num_fields* records have been extracted or the buffer
     is exhausted (whichever comes first).
 
-    Parameters
-    ----------
-    data:
-        Raw bytes received from the card (list of ints, 0–255).
-    num_fields:
-        Maximum number of fields to extract.
+    Args:
+        data: Raw bytes received from the card (list of ints, 0-255).
+        num_fields: Maximum number of fields to extract.
 
-    Returns
-    -------
-    list[str]
+    Returns:
         Decoded string values; an empty string is used for any field that
         cannot be decoded as UTF-8.
     """
@@ -71,15 +66,11 @@ def parse_french_date(date_str: str) -> datetime:
 
     Unknown month abbreviations fall back to January ("01").
 
-    Parameters
-    ----------
-    date_str:
-        Date string to parse.
+    Args:
+        date_str: Date string to parse.
 
-    Returns
-    -------
-    datetime
-        Parsed date (time component is midnight, no timezone).
+    Returns:
+        Parsed date as a ``datetime`` (time component is midnight, no timezone).
     """
     parts = date_str.split()
     if len(parts) != 3:

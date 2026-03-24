@@ -16,12 +16,9 @@ class CardCommunicationError(RuntimeError):
 class APDUError(CardCommunicationError):
     """Raised when an APDU command returns an unexpected status word.
 
-    Attributes
-    ----------
-    sw1 : int
-        First status byte (SW1).
-    sw2 : int
-        Second status byte (SW2).
+    Attributes:
+        sw1: First status byte (SW1).
+        sw2: Second status byte (SW2).
     """
 
     def __init__(self, sw1: int, sw2: int, message: str = "") -> None:

@@ -43,26 +43,23 @@ _SW_WRONG_LE = 0x6C     # Wrong Le: use SW2 as exact length
 class CardReader:
     """Read information from a Belgian eID card.
 
-    Parameters
-    ----------
-    reader_index:
-        Index of the PC/SC reader to use when multiple readers are connected.
-        Defaults to 0 (first available reader).
+    Args:
+        reader_index: Index of the PC/SC reader to use when multiple readers
+            are connected. Defaults to 0 (first available reader).
 
-    Examples
-    --------
-    Using as a context manager (recommended)::
+    Examples:
+        Using as a context manager (recommended)::
 
-        with CardReader() as cr:
-            data = cr.read_informations()
+            with CardReader() as cr:
+                data = cr.read_informations()
 
-    Or manually::
+        Or manually::
 
-        cr = CardReader()
-        try:
-            data = cr.read_informations()
-        finally:
-            cr.close()
+            cr = CardReader()
+            try:
+                data = cr.read_informations()
+            finally:
+                cr.close()
     """
 
     def __init__(self, reader_index: int = 0) -> None:
@@ -106,11 +103,9 @@ class CardReader:
     def _send_apdu(self, apdu: list[int]) -> tuple[list[int], int, int]:
         """Transmit one APDU and return ``(data, SW1, SW2)``.
 
-        Raises
-        ------
-        APDUError
-            If the card returns an unexpected status word (i.e. not 0x90,
-            0x61, or 0x6C).
+        Raises:
+            APDUError: If the card returns an unexpected status word
+                (i.e. not 0x90, 0x61, or 0x6C).
         """
         response, sw1, sw2 = self._cnx.transmit(apdu)
         logger.debug("APDU %s → SW=%02X%02X  data(%d)=%s",
@@ -192,20 +187,16 @@ class CardReader:
     def read_informations(self, photo: bool = False) -> dict[str, Any]:
         """Read and return all information from the card.
 
-        Parameters
-        ----------
-        photo:
-            When ``True`` the card photo is read and included in the
-            returned dictionary as a base-64 encoded string.
+        Args:
+            photo: When ``True`` the card photo is read and included in the
+                returned dictionary as a base-64 encoded string.
 
-        Returns
-        -------
-        dict
-            Keys: ``card_number``, ``validity_start``, ``validity_end``,
-            ``issuing_municipality``, ``national_number``, ``last_name``,
-            ``first_names``, ``suffix``, ``nationality``, ``birth_place``,
-            ``birth_date``, ``sex``, ``address``, ``postal_code``,
-            ``city``, and optionally ``photo``.
+        Returns:
+            A dictionary with keys: ``card_number``, ``validity_start``,
+            ``validity_end``, ``issuing_municipality``, ``national_number``,
+            ``last_name``, ``first_names``, ``suffix``, ``nationality``,
+            ``birth_place``, ``birth_date``, ``sex``, ``address``,
+            ``postal_code``, ``city``, and optionally ``photo``.
         """
         # ── Identity file ────────────────────────────────────────────────
         id_data = self._read_data(_FILE_ID)
