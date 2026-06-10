@@ -81,6 +81,26 @@ class TestCardReaderInit:
         mock_cnx.disconnect.assert_called_once()
 
 
+# ── list_readers ──────────────────────────────────────────────────────────
+
+class TestListReaders:
+    def test_returns_reader_names(self):
+        from pythonbeid.card_reader import list_readers
+        mock_reader = MagicMock()
+        mock_reader.__str__ = lambda self: "ACS ACR38U 0"
+        with patch("pythonbeid.card_reader.readers", return_value=[mock_reader]):
+            assert list_readers() == ["ACS ACR38U 0"]
+
+    def test_empty_when_no_reader(self):
+        from pythonbeid.card_reader import list_readers
+        with patch("pythonbeid.card_reader.readers", return_value=[]):
+            assert list_readers() == []
+
+    def test_exported_at_package_level(self):
+        import pythonbeid
+        assert callable(pythonbeid.list_readers)
+
+
 # ── _send_apdu error handling ────────────────────────────────────────────
 
 class TestSendApdu:

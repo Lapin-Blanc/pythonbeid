@@ -40,6 +40,17 @@ _SW_MORE_DATA = 0x61    # More data available (GET RESPONSE with SW2 bytes)
 _SW_WRONG_LE = 0x6C     # Wrong Le: use SW2 as exact length
 
 
+def list_readers() -> list[str]:
+    """Return the names of all connected PC/SC smart card readers.
+
+    Returns:
+        A list of human-readable reader names, in PC/SC order (the index
+        of a name matches the ``reader_index`` argument of
+        :class:`CardReader`). Empty when no reader is connected.
+    """
+    return [str(reader) for reader in readers()]
+
+
 class CardReader:
     """Read information from a Belgian eID card.
 
