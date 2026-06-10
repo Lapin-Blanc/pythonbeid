@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pythonbeid"
-version = "0.2.0"
+version = "0.3.0"
 description = "Un module pour lire les informations des cartes d'identité belges"
 readme = "README.md"
 license = "MIT"
