@@ -1,258 +1,820 @@
-"""Tests for CardReader.
+"""Tests of the PC/SC transport, against a simulated card."""
 
-Hardware-independent tests use unittest.mock to stub _send_apdu.
-Integration tests (require a real card) are skipped automatically when
-no reader is available.
-"""
-import pytest
+from __future__ import annotations
+
+import base64
 from datetime import datetime
-from unittest.mock import MagicMock, patch, call
+from typing import Any
 
-from pythonbeid.exceptions import APDUError, NoReaderError, NoCardError
-from pythonbeid.parser import parse_tlv
+import pytest
+from smartcard import scard
+from smartcard.Exceptions import (
+    CardConnectionException,
+    CardRequestTimeoutException,
+    NoCardException,
+)
+from smartcard.pcsc.PCSCExceptions import EstablishContextException
+from smartcard.scard import SCARD_LEAVE_CARD
 
+from pythonbeid import (
+    APDUError,
+    CardCommunicationError,
+    CardDataError,
+    CardFile,
+    CardReader,
+    NoCardError,
+    NoReaderError,
+    PCSCServiceError,
+    UnsupportedCardError,
+    list_readers,
+)
+from pythonbeid import card_reader as card_reader_module
 
-# ── Helpers ───────────────────────────────────────────────────────────────
+from .builders import PHOTO, Pki, identity_file, signed_files
+from .conftest import card_from
+from .fake_card import FakeCard, removed_error, reset_error
 
-def _tlv(*fields: str) -> list[int]:
-    buf: list[int] = []
-    for i, text in enumerate(fields, start=1):
-        raw = text.encode("utf-8")
-        buf += [i, len(raw)] + list(raw)
-    return buf
-
-
-def _make_reader(apdu_side_effect=None, apdu_return_value=None):
-    """Return a CardReader whose _send_apdu is fully mocked."""
-    from pythonbeid.card_reader import CardReader
-
-    mock_cnx = MagicMock()
-    mock_reader = MagicMock()
-    mock_reader.createConnection.return_value = mock_cnx
-
-    with patch("pythonbeid.card_reader.readers", return_value=[mock_reader]):
-        cr = CardReader()
-
-    if apdu_side_effect is not None:
-        cr._send_apdu = MagicMock(side_effect=apdu_side_effect)
-    elif apdu_return_value is not None:
-        cr._send_apdu = MagicMock(return_value=apdu_return_value)
-    return cr
-
-
-# ── CardReader construction ───────────────────────────────────────────────
-
-class TestCardReaderInit:
-    def test_no_readers_raises(self):
-        from pythonbeid.card_reader import CardReader
-        with patch("pythonbeid.card_reader.readers", return_value=[]):
-            with pytest.raises(NoReaderError):
-                CardReader()
-
-    def test_reader_index_out_of_range(self):
-        from pythonbeid.card_reader import CardReader
-        mock_reader = MagicMock()
-        mock_cnx = MagicMock()
-        mock_reader.createConnection.return_value = mock_cnx
-        with patch("pythonbeid.card_reader.readers", return_value=[mock_reader]):
-            with pytest.raises(NoReaderError):
-                CardReader(reader_index=5)
-
-    def test_no_card_raises(self):
-        from pythonbeid.card_reader import CardReader
-        from smartcard.Exceptions import NoCardException
-        mock_reader = MagicMock()
-        mock_cnx = MagicMock()
-        # NoCardException requires (message, hresult) on Windows/pyscard.
-        mock_cnx.connect.side_effect = NoCardException("No card", 0)
-        mock_reader.createConnection.return_value = mock_cnx
-        with patch("pythonbeid.card_reader.readers", return_value=[mock_reader]):
-            with pytest.raises(NoCardError):
-                CardReader()
-
-    def test_context_manager(self):
-        from pythonbeid.card_reader import CardReader
-        mock_cnx = MagicMock()
-        mock_reader = MagicMock()
-        mock_reader.createConnection.return_value = mock_cnx
-        with patch("pythonbeid.card_reader.readers", return_value=[mock_reader]):
-            with CardReader() as cr:
-                assert cr is not None
-        mock_cnx.disconnect.assert_called_once()
+Install = "Callable[..., list[FakeReader]]"
 
 
-# ── list_readers ──────────────────────────────────────────────────────────
+def _reads(card: FakeCard) -> list[bytes]:
+    return [apdu for apdu in card.log if apdu[1] == 0xB0]
+
+
+# ── Reader listing and selection ──────────────────────────────────────────
+
 
 class TestListReaders:
-    def test_returns_reader_names(self):
-        from pythonbeid.card_reader import list_readers
-        mock_reader = MagicMock()
-        mock_reader.__str__ = lambda self: "ACS ACR38U 0"
-        with patch("pythonbeid.card_reader.readers", return_value=[mock_reader]):
-            assert list_readers() == ["ACS ACR38U 0"]
+    def test_names(self, install_readers: Any, card17: FakeCard) -> None:
+        install_readers(("ACS ACR38U 0", card17), ("Other 1", None))
+        assert list_readers() == ["ACS ACR38U 0", "Other 1"]
 
-    def test_empty_when_no_reader(self):
-        from pythonbeid.card_reader import list_readers
-        with patch("pythonbeid.card_reader.readers", return_value=[]):
-            assert list_readers() == []
+    def test_empty(self, install_readers: Any) -> None:
+        install_readers()
+        assert list_readers() == []
 
-    def test_exported_at_package_level(self):
-        import pythonbeid
-        assert callable(pythonbeid.list_readers)
+    def test_service_unavailable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def fail() -> list[Any]:
+            raise EstablishContextException(scard.SCARD_E_NO_SERVICE)
 
-
-# ── _send_apdu error handling ────────────────────────────────────────────
-
-class TestSendApdu:
-    def test_ok_status_passes_through(self):
-        cr = _make_reader()
-        cr._cnx.transmit = MagicMock(return_value=([0x01, 0x02], 0x90, 0x00))
-        data, sw1, sw2 = cr._send_apdu([0x00, 0xB0, 0x00, 0x00, 0x00])
-        assert sw1 == 0x90
-
-    def test_unexpected_status_raises_apdu_error(self):
-        cr = _make_reader()
-        cr._cnx.transmit = MagicMock(return_value=([], 0x69, 0x82))
-        with pytest.raises(APDUError) as exc_info:
-            cr._send_apdu([0x00, 0xB0, 0x00, 0x00, 0x00])
-        assert exc_info.value.sw1 == 0x69
-        assert exc_info.value.sw2 == 0x82
+        monkeypatch.setattr(card_reader_module, "_pcsc_readers", fail)
+        with pytest.raises(PCSCServiceError, match="PC/SC service unavailable"):
+            list_readers()
+        with pytest.raises(NoReaderError):
+            CardReader()
 
 
-# ── _read_data (Le mismatch handling) ────────────────────────────────────
+class TestReaderSelection:
+    def test_no_reader(self, install_readers: Any) -> None:
+        install_readers()
+        with pytest.raises(NoReaderError, match="No smart card reader"):
+            CardReader()
 
-class TestReadData:
-    def test_read_data_le_mismatch_retried(self):
-        """0x6C on READ BINARY must trigger a retry with Le=SW2."""
-        from pythonbeid.card_reader import _FILE_ID
+    def test_auto_skips_empty_and_foreign_cards(
+        self, install_readers: Any, card17: FakeCard
+    ) -> None:
+        bank_card = FakeCard(files={}, is_beid=False)
+        install_readers(("Empty", None), ("Bank", bank_card), ("Belgian", card17))
+        with CardReader() as reader:
+            assert reader.reader_name == "Belgian"
+        assert bank_card.disconnect_calls == 1
 
-        id_payload = _tlv("CARD001", "CHIP001", "01.01.2020", "01.01.2030",
-                          "Brussels", "90010100115", "Smith", "John", "",
-                          "BEL", "Brussels", "01 JANV 1990", "M")
+    def test_auto_without_card(self, install_readers: Any) -> None:
+        install_readers(("Empty 0", None), ("Empty 1", None))
+        with pytest.raises(NoCardError, match="'Empty 0', 'Empty 1'"):
+            CardReader()
 
-        calls = iter([
-            ([], 0x90, 0x00),       # SELECT → OK
-            ([], 0x6C, 0x80),       # READ BINARY → wrong Le (expect 128)
-            (id_payload, 0x90, 0x00),  # READ BINARY retry with Le=0x80 → OK
-        ])
+    def test_index(
+        self, install_readers: Any, card17: FakeCard, card18: FakeCard
+    ) -> None:
+        install_readers(card17, card18)
+        with CardReader(1) as reader:
+            assert reader.card_info.applet_version == 0x18
 
-        cr = _make_reader(apdu_side_effect=lambda apdu: next(calls))
-        data = cr._read_data(_FILE_ID)
-        assert data == id_payload
+    @pytest.mark.parametrize("index", [2, -1])
+    def test_index_out_of_range(
+        self, install_readers: Any, card17: FakeCard, index: int
+    ) -> None:
+        install_readers(card17, card17)
+        with pytest.raises(NoReaderError, match="out of range"):
+            CardReader(index)
 
+    def test_exact_name(self, install_readers: Any, card17: FakeCard) -> None:
+        install_readers(("ACS ACR38U 0", None), ("ACS ACR38U 1", card17))
+        with CardReader("ACS ACR38U 1") as reader:
+            assert reader.reader_name == "ACS ACR38U 1"
 
-# ── read_informations (full flow with mocked APDU) ────────────────────────
-
-class TestReadInformations:
-    def _build_responses(self, with_photo: bool = False):
-        id_payload = _tlv(
-            "CARD001",          # card_number
-            "CHIP001",          # chip serial (index 1, ignored)
-            "15.03.2020",       # validity_start
-            "15.03.2030",       # validity_end
-            "Brussels",         # issuing_municipality
-            "90010100115",      # national_number
-            "Smith",            # last_name
-            "John",             # first_names
-            "",                 # suffix
-            "BEL",              # nationality
-            "Brussels",         # birth_place
-            "01 JANV 1990",     # birth_date
-            "M",                # sex
+    def test_name_substring(self, install_readers: Any, card17: FakeCard) -> None:
+        install_readers(
+            ("Alcor Micro USB Smart Card Reader 0", None), ("ACS ACR38U 0", card17)
         )
-        addr_payload = _tlv("Rue de la Loi 1", "1000", "Brussels")
+        with CardReader("acr38") as reader:
+            assert reader.reader_name == "ACS ACR38U 0"
 
-        # Build APDU call sequence:
-        # SELECT ID → OK, READ BINARY ID → OK,
-        # SELECT ADDR → OK, READ BINARY ADDR → OK
-        responses = [
-            ([], 0x90, 0x00),           # SELECT ID
-            (id_payload, 0x90, 0x00),   # READ BINARY ID
-            ([], 0x90, 0x00),           # SELECT ADDRESS
-            (addr_payload, 0x90, 0x00), # READ BINARY ADDRESS
-        ]
+    def test_ambiguous_name(self, install_readers: Any, card17: FakeCard) -> None:
+        install_readers(("ACS ACR38U 0", card17), ("ACS ACR38U 1", card17))
+        with pytest.raises(NoReaderError, match="ambiguous"):
+            CardReader("ACR38U")
 
-        if with_photo:
-            photo_chunk = list(b"\xFF\xD8" + b"\x00" * 254)  # 256 bytes
-            responses += [
-                ([], 0x90, 0x00),               # SELECT PHOTO
-                (photo_chunk, 0x90, 0x00),       # chunk 0 (full)
-                (list(b"\xFF\xD9"), 0x90, 0x00), # chunk 1 (partial → EOF)
+    def test_unknown_name(self, install_readers: Any, card17: FakeCard) -> None:
+        install_readers(("ACS ACR38U 0", card17))
+        with pytest.raises(NoReaderError, match="No reader matches 'Gemalto'"):
+            CardReader("Gemalto")
+
+    @pytest.mark.parametrize("value", [True, 1.5, b"name"])
+    def test_invalid_reader_type(
+        self, install_readers: Any, card17: FakeCard, value: Any
+    ) -> None:
+        install_readers(card17)
+        with pytest.raises(TypeError, match="index or a name"):
+            CardReader(value)
+
+    def test_explicit_reader_without_card(self, install_readers: Any) -> None:
+        install_readers(("Empty", None))
+        with pytest.raises(NoCardError):
+            CardReader(0)
+
+    def test_explicit_foreign_card(self, install_readers: Any) -> None:
+        install_readers(FakeCard(files={}, is_beid=False))
+        with pytest.raises(UnsupportedCardError, match="not a Belgian eID card"):
+            CardReader(0)
+
+    def test_deprecated_reader_index(
+        self, install_readers: Any, card17: FakeCard
+    ) -> None:
+        install_readers(None, card17)
+        with pytest.deprecated_call(), CardReader(reader_index=1) as reader:
+            assert reader.reader_name == "Fake Reader 1"
+
+    def test_reader_and_reader_index(
+        self, install_readers: Any, card17: FakeCard
+    ) -> None:
+        install_readers(card17)
+        with pytest.deprecated_call(), pytest.raises(TypeError, match="not both"):
+            CardReader(0, reader_index=0)
+
+    @pytest.mark.parametrize("size", [0, 257])
+    def test_invalid_chunk_size(
+        self, install_readers: Any, card17: FakeCard, size: int
+    ) -> None:
+        install_readers(card17)
+        with pytest.raises(ValueError, match="chunk_size"):
+            CardReader(chunk_size=size)
+
+
+class TestWaitForCard:
+    class _Service:
+        def __init__(self, name: str) -> None:
+            self.connection = type("C", (), {"getReader": lambda _self: name})()
+
+    def test_waits_then_connects(
+        self, install_readers: Any, card17: FakeCard, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        readers = install_readers(("Slot", None))
+        seen: dict[str, Any] = {}
+
+        class Request:
+            def __init__(self, **kwargs: Any) -> None:
+                seen.update(kwargs)
+
+            def waitforcard(self) -> Any:
+                readers[0].card = card17  # the card is inserted
+                return TestWaitForCard._Service("Slot")
+
+        monkeypatch.setattr(card_reader_module, "CardRequest", Request)
+        with CardReader(timeout=5) as reader:
+            assert reader.reader_name == "Slot"
+        assert seen["timeout"] == 5
+        assert seen["newcardonly"] is False
+
+    def test_infinite_timeout(
+        self, install_readers: Any, card17: FakeCard, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        readers = install_readers(("Slot", None))
+        seen: dict[str, Any] = {}
+
+        class Request:
+            def __init__(self, **kwargs: Any) -> None:
+                seen.update(kwargs)
+
+            def waitforcard(self) -> Any:
+                readers[0].card = card17
+                return TestWaitForCard._Service("Slot")
+
+        monkeypatch.setattr(card_reader_module, "CardRequest", Request)
+        CardReader(timeout=float("inf")).close()
+        assert seen["timeout"] is None
+
+    def test_timeout_expires(
+        self, install_readers: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        install_readers(("Slot", None))
+
+        class Request:
+            def __init__(self, **_: Any) -> None:
+                pass
+
+            def waitforcard(self) -> Any:
+                raise CardRequestTimeoutException
+
+        monkeypatch.setattr(card_reader_module, "CardRequest", Request)
+        with pytest.raises(NoCardError, match=r"within 0\.5 s"):
+            CardReader(timeout=0.5)
+
+    def test_wait_error(
+        self, install_readers: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        install_readers(("Slot", None))
+
+        class Request:
+            def __init__(self, **_: Any) -> None:
+                pass
+
+            def waitforcard(self) -> Any:
+                raise CardConnectionException("boom")
+
+        monkeypatch.setattr(card_reader_module, "CardRequest", Request)
+        with pytest.raises(CardCommunicationError, match="waiting for a card"):
+            CardReader(timeout=1)
+
+    def test_inserted_card_vanishes(
+        self, install_readers: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        install_readers(("Slot", None))
+
+        class Request:
+            def __init__(self, **_: Any) -> None:
+                pass
+
+            def waitforcard(self) -> Any:
+                return TestWaitForCard._Service("Slot")
+
+        monkeypatch.setattr(card_reader_module, "CardRequest", Request)
+        with pytest.raises(NoCardError, match="No card in reader 'Slot'"):
+            CardReader(timeout=1)
+
+
+# ── Connection lifecycle ──────────────────────────────────────────────────
+
+
+class TestConnection:
+    def test_leaves_card_powered(self, install_readers: Any, card17: FakeCard) -> None:
+        install_readers(card17)
+        CardReader().close()
+        assert card17.connect_kwargs["disposition"] == SCARD_LEAVE_CARD
+
+    def test_close_is_idempotent(self, install_readers: Any, card17: FakeCard) -> None:
+        install_readers(card17)
+        reader = CardReader()
+        reader.close()
+        reader.close()
+        assert card17.disconnect_calls == 1
+        assert repr(reader) == "<CardReader reader='Fake Reader 0' closed>"
+
+    def test_close_ignores_errors(self, install_readers: Any, card17: FakeCard) -> None:
+        card17.disconnect_error = CardConnectionException("gone")
+        install_readers(card17)
+        CardReader().close()
+
+    def test_use_after_close(self, install_readers: Any, card17: FakeCard) -> None:
+        install_readers(card17)
+        reader = CardReader()
+        reader.close()
+        with pytest.raises(CardCommunicationError, match="closed"):
+            reader.read_identity()
+
+    def test_context_manager_and_repr(
+        self, install_readers: Any, card17: FakeCard
+    ) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+            assert repr(reader) == "<CardReader reader='Fake Reader 0' open>"
+        assert card17.disconnect_calls == 1
+
+    def test_atr(self, install_readers: Any, card17: FakeCard) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+            assert reader.atr == card17.atr
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            NoCardException("No card", 0),
+            CardConnectionException("x", hresult=scard.SCARD_E_NO_SMARTCARD),
+        ],
+    )
+    def test_connect_no_card(
+        self, install_readers: Any, card17: FakeCard, error: Exception
+    ) -> None:
+        card17.connect_error = error
+        install_readers(card17)
+        with pytest.raises(NoCardError):
+            CardReader(0)
+
+    def test_connect_failure(self, install_readers: Any, card17: FakeCard) -> None:
+        card17.connect_error = CardConnectionException("protocol mismatch")
+        install_readers(card17)
+        with pytest.raises(CardCommunicationError, match="Connection error"):
+            CardReader(0)
+
+    def test_card_removed_during_card_data(
+        self, install_readers: Any, card17: FakeCard
+    ) -> None:
+        card17.transmit_errors = [removed_error()]
+        install_readers(card17)
+        with pytest.raises(NoCardError, match="No Belgian eID card in reader"):
+            CardReader(0)
+        assert card17.disconnect_calls == 1
+
+
+# ── APDU handling ─────────────────────────────────────────────────────────
+
+
+class TestReadFile:
+    def test_file_multiple_of_chunk(
+        self, install_readers: Any, card17: FakeCard
+    ) -> None:
+        """A file of exactly 2 blocks ends with 6B00, which is not an error."""
+        content = bytes(range(252)) * 2
+        card17.files[CardFile.PHOTO.path] = content
+        install_readers(card17)
+        with CardReader() as reader:
+            assert reader.read_photo() == content
+        offsets = [(apdu[2] << 8) | apdu[3] for apdu in _reads(card17)]
+        assert offsets == [0, 252, 504]
+
+    def test_short_last_block_uses_6c(
+        self, install_readers: Any, card17: FakeCard
+    ) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+            assert reader.read_photo() == PHOTO
+        assert any(apdu[4] == len(PHOTO) % 252 for apdu in _reads(card17))
+
+    def test_6c_retry_delay_on_global_os_1(
+        self, install_readers: Any, card18: FakeCard, no_sleep: list[float]
+    ) -> None:
+        install_readers(card18)
+        with CardReader() as reader:
+            reader.read_identity()
+        assert no_sleep
+        assert set(no_sleep) == {0.05}
+
+    def test_no_delay_on_global_os_3(
+        self, install_readers: Any, card17: FakeCard, no_sleep: list[float]
+    ) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+            reader.read_identity()
+        assert no_sleep == []
+
+    def test_get_response(self, install_readers: Any, card17: FakeCard) -> None:
+        card17.get_response_mode = True
+        install_readers(card17)
+        with CardReader() as reader:
+            assert reader.read_photo() == PHOTO
+        assert any(apdu[1] == 0xC0 for apdu in card17.log)
+
+    def test_eof_warning(self, install_readers: Any, card17: FakeCard) -> None:
+        card17.eof_warning = True
+        install_readers(card17)
+        with CardReader() as reader:
+            assert reader.read_photo() == PHOTO
+
+    def test_chunk_size_256_sends_le_zero(
+        self, install_readers: Any, card17: FakeCard
+    ) -> None:
+        install_readers(card17)
+        with CardReader(chunk_size=256) as reader:
+            assert reader.read_photo() == PHOTO
+        assert _reads(card17)[0][4] == 0x00
+
+    def test_small_chunk_size(self, install_readers: Any, card17: FakeCard) -> None:
+        install_readers(card17)
+        with CardReader(chunk_size=64) as reader:
+            assert reader.read_photo() == PHOTO
+
+    def test_path_as_bytes_or_list(
+        self, install_readers: Any, card17: FakeCard
+    ) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+            assert reader.read_file(bytes.fromhex("3F00DF014035")) == PHOTO
+            assert reader.read_file([0x3F, 0x00, 0xDF, 0x01, 0x40, 0x35]) == PHOTO
+
+    def test_missing_file(self, install_readers: Any, card17: FakeCard) -> None:
+        install_readers(card17)
+        with (
+            CardReader() as reader,
+            pytest.raises(APDUError, match="file not found") as info,
+        ):
+            reader.read_file(CardFile.BASIC_PUBLIC_KEY)
+        assert info.value.sw == 0x6A82
+
+    def test_applet_reselection(self, install_readers: Any, card17: FakeCard) -> None:
+        card17.require_applet_select = True
+        install_readers(card17)
+        with CardReader() as reader:
+            assert reader.read_identity().last_name == "Specimen"
+        assert any(apdu[:3] == b"\x00\xa4\x04" for apdu in card17.log)
+
+    def test_unexpected_status(self, install_readers: Any, card17: FakeCard) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+            card17.is_beid = False
+            with pytest.raises(APDUError, match="SW=6E00 \\(class not supported\\)"):
+                reader.read_identity()
+
+    def test_unknown_status_message(
+        self, install_readers: Any, card17: FakeCard
+    ) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+            card17.files[CardFile.PHOTO.path] = b""  # 6B00 at offset 0 is an error
+            with pytest.raises(APDUError, match="offset outside the file"):
+                reader.read_photo()
+
+    def test_offset_limit(self, install_readers: Any, card17: FakeCard) -> None:
+        card17.files[CardFile.PHOTO.path] = bytes(0x8100)
+        install_readers(card17)
+        with (
+            CardReader(chunk_size=256) as reader,
+            pytest.raises(CardDataError, match="offset range"),
+        ):
+            reader.read_photo()
+
+    def test_endless_get_response(self, install_readers: Any, card17: FakeCard) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+            card17.transmit = lambda apdu: ([], 0x61, 0x10)  # type: ignore[method-assign]
+            with pytest.raises(CardCommunicationError, match="GET RESPONSE"):
+                reader.read_identity()
+
+    def test_persistent_6c(self, install_readers: Any, card17: FakeCard) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+            original = card17.transmit
+            card17.transmit = lambda apdu: (  # type: ignore[method-assign]
+                ([], 0x6C, 0x10) if apdu[1] == 0xB0 else original(apdu)
+            )
+            with pytest.raises(APDUError, match="SW=6C10"):
+                reader.read_identity()
+
+    def test_read_certificate_trims_padding(
+        self, install_readers: Any, card17: FakeCard, rsa_pki: Pki
+    ) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+            certificate = reader.read_certificate(CardFile.RRN_CERTIFICATE)
+        assert rsa_pki.rrn_file.startswith(certificate)
+        assert len(certificate) == len(rsa_pki.rrn_file) - 64
+
+    def test_read_certificate_rejects_other_files(
+        self, install_readers: Any, card17: FakeCard
+    ) -> None:
+        install_readers(card17)
+        with (
+            CardReader() as reader,
+            pytest.raises(ValueError, match="not a certificate"),
+        ):
+            reader.read_certificate(CardFile.PHOTO)
+
+    def test_read_card_info_again(self, install_readers: Any, card17: FakeCard) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+            first = reader.card_info
+            assert reader.read_card_info() == first
+
+
+class TestTransactions:
+    def test_each_file_in_a_transaction(
+        self, install_readers: Any, card17: FakeCard
+    ) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+            before = card17.lock_calls
+            reader.read_identity()
+            reader.read_address()
+        assert card17.lock_calls - before == 2
+        assert card17.lock_calls == card17.unlock_calls
+
+    def test_read_uses_a_single_transaction(
+        self, install_readers: Any, card17: FakeCard
+    ) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+            before = card17.lock_calls
+            reader.read()
+        assert card17.lock_calls - before == 1
+        assert card17.lock_calls == card17.unlock_calls
+
+    def test_unlock_errors_are_ignored(
+        self, install_readers: Any, card17: FakeCard
+    ) -> None:
+        card17.unlock_error = CardConnectionException("removed")
+        install_readers(card17)
+        with CardReader() as reader:
+            assert reader.read_identity().last_name == "Specimen"
+
+    def test_lock_failure(self, install_readers: Any, card17: FakeCard) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+            card17.lock = lambda: (_ for _ in ()).throw(CardConnectionException("busy"))  # type: ignore[method-assign]
+            with pytest.raises(CardCommunicationError, match="busy"):
+                reader.read_identity()
+
+    def test_reset_is_recovered(self, install_readers: Any, card17: FakeCard) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+            card17.transmit_errors = [reset_error()]
+            assert reader.read_photo() == PHOTO
+        assert card17.reconnect_calls == 1
+
+    def test_reset_inside_read_relocks(
+        self, install_readers: Any, card17: FakeCard
+    ) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+            before = card17.lock_calls
+            card17.transmit_errors = [reset_error()]
+            eid = reader.read()
+        assert eid.photo == PHOTO
+        assert card17.reconnect_calls == 1
+        assert card17.lock_calls - before == 2
+
+    def test_reset_when_locking(self, install_readers: Any, card17: FakeCard) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+            calls = {"count": 0}
+            original = card17.lock
+
+            def lock() -> None:
+                calls["count"] += 1
+                if calls["count"] == 1:
+                    raise reset_error()
+                original()
+
+            card17.lock = lock  # type: ignore[method-assign]
+            assert reader.read_identity().last_name == "Specimen"
+        assert card17.reconnect_calls == 1
+
+    def test_repeated_reset(self, install_readers: Any, card17: FakeCard) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+            card17.transmit_errors = [reset_error(), reset_error()]
+            with pytest.raises(CardCommunicationError, match="reset repeatedly"):
+                reader.read_identity()
+
+    def test_card_removed(self, install_readers: Any, card17: FakeCard) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+            card17.transmit_errors = [NoCardException("gone", 0)]
+            with pytest.raises(NoCardError, match="removed"):
+                reader.read_identity()
+            card17.transmit_errors = [removed_error()]
+            with pytest.raises(NoCardError, match="removed"):
+                reader.read_identity()
+
+    def test_other_transport_error(
+        self, install_readers: Any, card17: FakeCard
+    ) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+            card17.transmit_errors = [
+                CardConnectionException("timeout", hresult=scard.SCARD_E_TIMEOUT)
             ]
+            with pytest.raises(CardCommunicationError, match="Communication error"):
+                reader.read_identity()
 
-        return iter(responses)
 
-    def test_identity_fields(self):
-        responses = self._build_responses()
-        cr = _make_reader(apdu_side_effect=lambda apdu: next(responses))
-        info = cr.read_informations()
-        assert info["card_number"] == "CARD001"
-        assert info["last_name"] == "Smith"
-        assert info["first_names"] == "John"
-        assert info["birth_date"] == datetime(1990, 1, 1)
-        assert info["nationality"] == "BEL"
+# ── High-level reads ──────────────────────────────────────────────────────
 
-    def test_address_fields(self):
-        responses = self._build_responses()
-        cr = _make_reader(apdu_side_effect=lambda apdu: next(responses))
-        info = cr.read_informations()
-        assert info["address"] == "Rue de la Loi 1"
-        assert info["postal_code"] == "1000"
-        assert info["city"] == "Brussels"
 
-    def test_validity_dates_are_datetime(self):
-        responses = self._build_responses()
-        cr = _make_reader(apdu_side_effect=lambda apdu: next(responses))
-        info = cr.read_informations()
+class TestRead:
+    def test_read_everything(self, install_readers: Any, card17: FakeCard) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+            eid = reader.read()
+        assert eid.identity.last_name == "Specimen"
+        assert eid.address.street == "Rue de la Loi 16"
+        assert eid.photo == PHOTO
+        assert eid.card.applet_version_string == "1.7"
+        assert set(eid.files) == {
+            CardFile.IDENTITY,
+            CardFile.ADDRESS,
+            CardFile.PHOTO,
+            CardFile.IDENTITY_SIGNATURE,
+            CardFile.ADDRESS_SIGNATURE,
+            CardFile.RRN_CERTIFICATE,
+        }
+
+    def test_read_minimal(self, install_readers: Any, card17: FakeCard) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+            eid = reader.read(photo=False, integrity=False)
+        assert eid.photo is None
+        assert set(eid.files) == {CardFile.IDENTITY, CardFile.ADDRESS}
+
+    def test_read_applet_18_includes_basic_key(
+        self, install_readers: Any, card18: FakeCard
+    ) -> None:
+        install_readers(card18)
+        with CardReader() as reader:
+            eid = reader.read()
+        assert CardFile.BASIC_PUBLIC_KEY in eid.files
+        assert eid.card.pin_attempts_left == 3
+
+    def test_read_identity_and_address(
+        self, install_readers: Any, card17: FakeCard
+    ) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+            assert reader.read_identity().national_number_valid
+            assert reader.read_address().postal_code == "1000"
+
+
+class TestChip:
+    def test_authenticate_genuine_chip(
+        self, install_readers: Any, card18: FakeCard
+    ) -> None:
+        install_readers(card18)
+        with CardReader() as reader:
+            assert reader.authenticate_chip() is True
+
+    def test_challenge_answer(self, install_readers: Any, card18: FakeCard) -> None:
+        install_readers(card18)
+        with CardReader() as reader:
+            assert len(reader.challenge(bytes(48))) == 96
+        command = next(apdu for apdu in card18.log if apdu[1] == 0x88)
+        assert command[:7] == bytes([0x00, 0x88, 0x02, 0x81, 50, 0x94, 48])
+
+    def test_cloned_chip(
+        self, install_readers: Any, ec_pki: Pki, basic_key: Any
+    ) -> None:
+        from cryptography.hazmat.primitives.asymmetric import ec
+
+        impostor = card_from(
+            signed_files(ec_pki, basic_key=basic_key),
+            applet=0x18,
+            basic_key=ec.generate_private_key(ec.SECP384R1()),
+        )
+        install_readers(impostor)
+        with CardReader() as reader:
+            assert reader.authenticate_chip() is False
+
+    def test_applet_17_has_no_basic_key(
+        self, install_readers: Any, card17: FakeCard
+    ) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+            with pytest.raises(UnsupportedCardError, match=r"1\.7"):
+                reader.authenticate_chip()
+            with pytest.raises(UnsupportedCardError):
+                reader.challenge(bytes(48))
+
+    @pytest.mark.parametrize("size", [0, 254])
+    def test_nonce_size(
+        self, install_readers: Any, card18: FakeCard, size: int
+    ) -> None:
+        install_readers(card18)
+        with CardReader() as reader, pytest.raises(ValueError, match="nonce"):
+            reader.challenge(bytes(size))
+
+
+class TestVerify:
+    def test_verify_applet_17(
+        self, install_readers: Any, card17: FakeCard, rsa_pki: Pki
+    ) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+            report = reader.verify(trusted_roots=[rsa_pki.root_pem])
+        assert report.is_valid
+        assert report.chip_authenticated is None
+
+    def test_verify_applet_18_with_chip(
+        self, install_readers: Any, card18: FakeCard, ec_pki: Pki
+    ) -> None:
+        install_readers(card18)
+        with CardReader() as reader:
+            report = reader.verify(trusted_roots=[ec_pki.root_pem])
+        assert report.is_valid
+        assert report.basic_key_valid is True
+        assert report.chip_authenticated is True
+
+    def test_verify_without_chip(
+        self, install_readers: Any, card18: FakeCard, ec_pki: Pki
+    ) -> None:
+        install_readers(card18)
+        with CardReader() as reader:
+            report = reader.verify(
+                authenticate_chip=False, trusted_roots=[ec_pki.root_pem]
+            )
+        assert report.chip_authenticated is None
+
+    def test_verify_reuses_data(
+        self, install_readers: Any, card17: FakeCard, rsa_pki: Pki
+    ) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+            eid = reader.read()
+            count = len(card17.log)
+            assert reader.verify(eid, trusted_roots=[rsa_pki.root_pem]).is_valid
+        assert len(card17.log) == count
+
+    def test_verify_cloned_chip(
+        self, install_readers: Any, ec_pki: Pki, basic_key: Any
+    ) -> None:
+        from cryptography.hazmat.primitives.asymmetric import ec
+
+        impostor = card_from(
+            signed_files(ec_pki, basic_key=basic_key),
+            applet=0x18,
+            basic_key=ec.generate_private_key(ec.SECP384R1()),
+        )
+        install_readers(impostor)
+        with CardReader() as reader:
+            report = reader.verify(trusted_roots=[ec_pki.root_pem])
+        assert not report.is_valid
+        assert report.chip_authenticated is False
+        assert "chip challenge failed" in report.errors[-1]
+
+
+class TestLegacyApi:
+    def test_read_informations(self, install_readers: Any, card17: FakeCard) -> None:
+        install_readers(card17)
+        with CardReader() as reader, pytest.deprecated_call():
+            info = reader.read_informations()
+        assert set(info) == {
+            "card_number", "validity_start", "validity_end", "issuing_municipality",
+            "national_number", "last_name", "first_names", "suffix", "nationality",
+            "birth_place", "birth_date", "sex", "address", "postal_code", "city",
+        }  # fmt: skip
+        assert info["birth_date"] == datetime(1985, 3, 24)  # noqa: DTZ001
         assert isinstance(info["validity_start"], datetime)
-        assert isinstance(info["validity_end"], datetime)
+        assert info["suffix"] == "B"
+        assert info["sex"] == "F"
+        assert info["city"] == "Bruxelles"
+        assert reader.last_name == "Specimen"  # type: ignore[attr-defined]
 
-    def test_attributes_set_on_instance(self):
-        responses = self._build_responses()
-        cr = _make_reader(apdu_side_effect=lambda apdu: next(responses))
-        info = cr.read_informations()
-        assert cr.last_name == info["last_name"]
-        assert cr.birth_date == info["birth_date"]
+    def test_read_informations_photo(
+        self, install_readers: Any, card17: FakeCard
+    ) -> None:
+        install_readers(card17)
+        with CardReader() as reader, pytest.deprecated_call():
+            info = reader.read_informations(True)
+        assert base64.b64decode(info["photo"]) == PHOTO
 
-    def test_photo_included_when_requested(self):
-        responses = self._build_responses(with_photo=True)
-        cr = _make_reader(apdu_side_effect=lambda apdu: next(responses))
-        info = cr.read_informations(photo=True)
-        assert "photo" in info
-        assert isinstance(info["photo"], str)  # base64 string
-
-    def test_photo_absent_by_default(self):
-        responses = self._build_responses()
-        cr = _make_reader(apdu_side_effect=lambda apdu: next(responses))
-        info = cr.read_informations()
-        assert "photo" not in info
+    def test_incomplete_birth_date(self, install_readers: Any, rsa_pki: Pki) -> None:
+        card = card_from(signed_files(rsa_pki, identity=identity_file(tag_0C="1984")))
+        install_readers(card)
+        with CardReader() as reader, pytest.deprecated_call():
+            assert reader.read_informations()["birth_date"] is None
 
 
-# ── Integration test (real hardware) ─────────────────────────────────────
+class TestTransactionalConnection:
+    """The real decorator, with the PC/SC functions replaced."""
 
-def _hardware_available() -> bool:
-    try:
-        from smartcard.System import readers as _readers
-        from smartcard.Exceptions import NoCardException
-        available = _readers()
-        if not available:
-            return False
-        cnx = available[0].createConnection()
-        cnx.connect()
-        cnx.disconnect()
-        return True
-    except Exception:
-        return False
+    class _Component:
+        hcard = 1234
 
+        def __init__(self) -> None:
+            self.component = None
 
-@pytest.mark.skipif(not _hardware_available(), reason="No card reader / card available")
-class TestIntegration:
-    def test_read_informations_returns_dict(self):
-        from pythonbeid import CardReader
-        with CardReader() as cr:
-            info = cr.read_informations()
-        assert isinstance(info, dict)
-        assert "card_number" in info
-        assert "last_name" in info
-        assert "birth_date" in info
-        assert isinstance(info["birth_date"], datetime)
+    @pytest.fixture
+    def scard_calls(self, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+        calls: dict[str, Any] = {
+            "begin": [],
+            "end": [],
+            "result": scard.SCARD_S_SUCCESS,
+        }
+
+        def begin(hcard: int) -> int:
+            calls["begin"].append(hcard)
+            return int(calls["result"])
+
+        def end(hcard: int, disposition: int) -> int:
+            calls["end"].append((hcard, disposition))
+            return int(calls["result"])
+
+        monkeypatch.setattr(card_reader_module, "SCardBeginTransaction", begin)
+        monkeypatch.setattr(card_reader_module, "SCardEndTransaction", end)
+        return calls
+
+    def test_finds_nested_handle(self, scard_calls: dict[str, Any]) -> None:
+        inner = self._Component()
+        middle = type("Middle", (), {"component": inner})()
+        connection = card_reader_module._wrap_connection(middle)
+        connection.lock()
+        connection.unlock()
+        assert scard_calls["begin"] == [1234]
+        assert scard_calls["end"] == [(1234, SCARD_LEAVE_CARD)]
+
+    @pytest.mark.parametrize("method", ["lock", "unlock"])
+    def test_failure_keeps_hresult(
+        self, scard_calls: dict[str, Any], method: str
+    ) -> None:
+        scard_calls["result"] = scard.SCARD_W_RESET_CARD
+        connection = card_reader_module._wrap_connection(self._Component())
+        with pytest.raises(CardConnectionException) as info:
+            getattr(connection, method)()
+        assert info.value.hresult == scard.SCARD_W_RESET_CARD
