@@ -231,7 +231,8 @@ names raise instead of defaulting to January.
 - Applet 1.7 cards (RSA keys) and applet 1.8 cards (elliptic-curve keys,
   current generation): validated on real cards, including every
   authenticity check and the chip challenge of applet 1.8.
-- Readers: validated with an ACS ACR38U; any PC/SC reader should work.
+- Readers: validated with an ACS ACR38U and a reader using the Windows
+  generic CCID driver; any PC/SC reader should work.
   Reports about other readers, Kids-ID and residence cards are welcome (see
   the issue template; never share personal data).
 - Python 3.11 to 3.15 on Windows, macOS and Linux.
