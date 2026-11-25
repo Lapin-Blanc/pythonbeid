@@ -1,0 +1,96 @@
+# Changelog
+
+All notable changes to this project are documented here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
+[Semantic Versioning](https://semver.org/).
+
+## [1.0.0] - 2026-11-25
+
+### Added
+
+- Typed API: `CardReader.read()` returns an immutable `EidData` with
+  `Identity`, `Address` and `CardInfo` dataclasses; `read_identity()`,
+  `read_address()`, `read_photo()`, `read_file()`, `read_certificate()`,
+  `read_card_info()`.
+- Every field of the identity file defined by the specification v5.0
+  (tags `0x00` to `0x1F`), including noble condition, document type, special
+  status, photo and basic key digests and the fields of residence cards.
+- `PartialDate` for incomplete birth dates, `Sex`, `DocumentType` and
+  `SpecialStatus` enums, `is_valid_national_number()`.
+- Authenticity checks (`pip install "pythonbeid[verify]"`): photo digest,
+  identity and address signatures (RSA and ECDSA), RRN certificate chain to
+  the bundled Belgian roots CA2, CA3, CA4 and CA6, basic key and chip
+  challenge on applet 1.8 cards. `CardReader.verify()`, `verify_eid()`,
+  `verify_photo()`.
+- Reader selection by index, name or substring; automatic selection of the
+  reader holding a Belgian eID card; `timeout` to wait for a card.
+- Command line: `pythonbeid readers | info | read | verify` and
+  `python -m pythonbeid`.
+- `py.typed` marker, `__version__`, `CardFile` enum of the card files.
+- `BeidError` base exception, `PCSCServiceError`, `UnsupportedCardError`,
+  `CardDataError`; `APDUError.sw`.
+
+### Fixed
+
+- Birth dates written in Dutch or German: most months were silently read as
+  January, and German dates (`22.DEZ. 1997`) raised an error.
+- Reading a file whose size is a multiple of the block size raised
+  `APDUError` (`6B00` at end of file).
+- `61xx` answers were accepted without GET RESPONSE, silently returning
+  truncated data.
+- TLV parsing ignored tags: fields were taken by position, which breaks when
+  a tag is absent or when the version tag `0x00` is present. Lengths of 255
+  bytes and more are now decoded as specified.
+- Values kept their padding spaces and zero bytes.
+- The field read as `suffix` is the first letter of the third given name.
+- pyscard exceptions leaked out of the library; they are now wrapped.
+- Closing the connection powered the card down for other applications.
+- Negative reader indexes silently selected the last reader.
+
+### Changed
+
+- Commands run inside PC/SC transactions; the connection recovers when
+  another application resets the card.
+- Files are read in 252-byte blocks, like the official middleware.
+- Requires Python 3.11 or later and pyscard 2.0.8 or later.
+- Unknown month names raise `CardDataError` instead of defaulting to January.
+
+### Deprecated
+
+- `CardReader.read_informations()` (use `read()`), `reader_index` (pass the
+  index as `reader`), `parse_tlv()` (use `decode_tlv()`),
+  `parse_french_date()` (use `parse_birth_date()`). They keep their 0.x
+  output and will be removed in 2.0.
+
+## [0.3.0] - 2026-06-10
+
+### Added
+
+- `list_readers()` public function.
+- Publication to PyPI with Trusted Publishing on version tags.
+
+## [0.2.0] - 2026-03-03
+
+### Changed
+
+- Package restructured (`card_reader`, `parser`, `exceptions`), English
+  dictionary keys, context manager, dedicated exceptions, `pyproject.toml`,
+  test suite.
+
+## [0.1.1] - 2024-06-22
+
+### Fixed
+
+- Packaging metadata.
+
+## [0.1.0] - 2024-06-22
+
+### Added
+
+- First release on PyPI: identity, address and photo reading.
+
+[1.0.0]: https://github.com/Lapin-Blanc/pythonbeid/compare/v0.3.0...v1.0.0
+[0.3.0]: https://github.com/Lapin-Blanc/pythonbeid/releases/tag/v0.3.0
+[0.2.0]: https://pypi.org/project/pythonbeid/0.2.0/
+[0.1.1]: https://pypi.org/project/pythonbeid/0.1.1/
+[0.1.0]: https://pypi.org/project/pythonbeid/0.1.0/
