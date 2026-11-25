@@ -1,0 +1,48 @@
+name: Bug report
+description: Something does not work with a card or a reader
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never paste personal data from an eID card** (names, national number,
+        address, photo, card or chip numbers) in an issue: this repository is public.
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: What you did, what you expected and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: traceback
+    attributes:
+      label: Error message or traceback
+      description: Check that it contains no personal data.
+      render: text
+  - type: textarea
+    id: card
+    attributes:
+      label: Card information
+      description: |
+        Output of `pythonbeid info --json`, **with the `serial_number` line removed**.
+      render: json
+  - type: input
+    id: reader
+    attributes:
+      label: Reader model
+      placeholder: ACS ACR38U
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: pythonbeid 1.0.0, Python 3.13, Windows 11 / Ubuntu 24.04 / macOS 15
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy
+      options:
+        - label: I checked that this issue contains no personal data from an eID card.
+          required: true

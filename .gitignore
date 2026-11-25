@@ -63,3 +63,11 @@ target/
 
 # Claude Code local config
 .claude/
+
+# Type checking / linting caches
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/

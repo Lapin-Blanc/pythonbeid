@@ -1,3 +1,5 @@
+# The file name and the "pypi" environment are registered as a Trusted
+# Publisher on PyPI: renaming either breaks publishing.
 name: Publish to PyPI
 
 on:
@@ -10,19 +12,26 @@ permissions:
   contents: read
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
 
+  build:
+    name: Build release distributions
+    needs: ci
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          python-version: "3.11"
+          persist-credentials: false
 
-      - name: Validate tag matches project version
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Validate tag and changelog
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           python - <<'PY'
@@ -30,49 +39,75 @@ jobs:
           import pathlib
           import tomllib
 
-          pyproject = pathlib.Path("pyproject.toml")
-          version = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"]["version"]
+          version = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
           tag = os.environ["GITHUB_REF_NAME"]
-          expected = f"v{version}"
-          if tag != expected:
-              raise SystemExit(
-                  f"Tag/version mismatch: got tag '{tag}', expected '{expected}' from pyproject.toml."
-              )
-          print(f"Tag/version check OK: {tag}")
+          if tag != f"v{version}":
+              raise SystemExit(f"Tag/version mismatch: tag '{tag}', pyproject.toml '{version}'.")
+          if f"## [{version}]" not in pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8"):
+              raise SystemExit(f"CHANGELOG.md has no section for {version}.")
+          print(f"Release {tag} OK")
           PY
 
-      - name: Install build tooling
-        run: python -m pip install --upgrade build twine
-
       - name: Build distributions
-        run: python -m build
+        run: |
+          python -m pip install build twine
+          python -m build
+          python -m twine check --strict dist/*
 
-      - name: Check distributions
-        run: python -m twine check dist/*
-
-      - name: Upload dist artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload distributions
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist
           path: dist/
           if-no-files-found: error
 
   publish:
+    name: Publish to PyPI
     needs: build
-    runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
-    permissions:
-      id-token: write
-
+    runs-on: ubuntu-latest
     environment:
       name: pypi
-
+      url: https://pypi.org/project/pythonbeid/
+    permissions:
+      id-token: write
     steps:
-      - name: Download dist artifact
-        uses: actions/download-artifact@v4
+      - name: Download distributions
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: dist
           path: dist/
 
-      - name: Publish to PyPI (Trusted Publishing)
-        uses: pypa/gh-action-pypi-publish@release/v1
+      - name: Publish (Trusted Publishing)
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
+
+  github-release:
+    name: Create the GitHub release
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download distributions
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+
+      - name: Create the release from the changelog
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          awk -v header="## [${version}]" '
+            index($0, header) == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          gh release create "$TAG" dist/* --title "pythonbeid ${version}" --notes-file notes.md --verify-tag
