@@ -119,9 +119,9 @@ class TestVerifyEid:
         ).is_valid
 
     def test_without_photo(self, rsa_pki: Pki) -> None:
-        report = verify_eid(
-            _eid(signed_files(rsa_pki), photo=False), trusted_roots=[rsa_pki.root_pem]
-        )
+        files = signed_files(rsa_pki)
+        del files[CardFile.PHOTO]
+        report = verify_eid(_eid(files, photo=False), trusted_roots=[rsa_pki.root_pem])
         assert report.photo_hash_valid is None
         assert report.is_valid
 
@@ -184,13 +184,24 @@ class TestVerifyEid:
             rrn_not_after=datetime(2015, 1, 1, tzinfo=UTC),
         )
         report = verify_eid(_eid(signed_files(pki)), trusted_roots=[pki.root_pem])
-        assert not report.rrn_certificate_valid_at_issuance
-        assert "not valid when the card was issued" in report.errors[0]
+        assert not report.rrn_certificate_period_valid
+        assert "not valid during the card validity" in report.errors[0]
 
-    def test_rrn_issued_after_card(self) -> None:
+    def test_resigned_card_with_newer_rrn(self) -> None:
+        """Re-signed cards carry an RRN certificate newer than the card."""
         pki = make_pki("ec", rrn_not_before=datetime(2022, 1, 1, tzinfo=UTC))
         report = verify_eid(_eid(signed_files(pki)), trusted_roots=[pki.root_pem])
-        assert not report.rrn_certificate_valid_at_issuance
+        assert report.rrn_certificate_period_valid
+        assert report.is_valid
+
+    def test_rrn_issued_after_card_expiry(self) -> None:
+        pki = make_pki(
+            "ec",
+            rrn_not_before=datetime(2032, 1, 1, tzinfo=UTC),
+            rrn_not_after=datetime(2040, 1, 1, tzinfo=UTC),
+        )
+        report = verify_eid(_eid(signed_files(pki)), trusted_roots=[pki.root_pem])
+        assert not report.rrn_certificate_period_valid
 
     def test_rrn_expired_today_is_fine(self) -> None:
         """Observed on real cards: the RRN certificate outlives its own validity."""
@@ -274,24 +285,25 @@ class TestBasicKey:
             is False
         )
 
-    def test_missing_digest(
+    def test_no_signed_digest(
         self, ec_pki: Pki, basic_key: ec.EllipticCurvePrivateKey
     ) -> None:
+        """Without a signed digest there is nothing to check."""
         files = signed_files(ec_pki, basic_key=basic_key)
         key_file = files[CardFile.BASIC_PUBLIC_KEY]
         files = signed_files(ec_pki)  # identity without tag 0x1A
         files[CardFile.BASIC_PUBLIC_KEY] = key_file
         report = verify_eid(_eid(files, applet=0x18), trusted_roots=[ec_pki.root_pem])
-        assert report.basic_key_valid is False
-        assert "no basic key digest" in report.errors[0]
+        assert report.basic_key_valid is None
 
     def test_key_file_not_read(
         self, ec_pki: Pki, basic_key: ec.EllipticCurvePrivateKey
     ) -> None:
         files = signed_files(ec_pki, basic_key=basic_key)
         del files[CardFile.BASIC_PUBLIC_KEY]
-        report = verify_eid(_eid(files, applet=0x18), trusted_roots=[ec_pki.root_pem])
-        assert report.basic_key_valid is None
+        report = verify_eid(_eid(files, applet=0x17), trusted_roots=[ec_pki.root_pem])
+        assert report.basic_key_valid is False  # fails closed, whatever the applet
+        assert "was not read" in report.errors[0]
 
 
 class TestChipSignature:
@@ -349,3 +361,116 @@ def test_report_is_replaceable(rsa_pki: Pki) -> None:
     report = verify_eid(_eid(signed_files(rsa_pki)), trusted_roots=[rsa_pki.root_pem])
     changed: Any = replace(report, chip_authenticated=False)
     assert not changed.is_valid
+
+
+class TestReviewFindings:
+    """Regression tests for issues found by an independent review."""
+
+    def test_forged_decoded_fields(self, rsa_pki: Pki) -> None:
+        """Genuine files with forged decoded fields must not pass."""
+        files = signed_files(rsa_pki)
+        forged_photo = PHOTO[:-1] + b"\x01"
+        forged = EidData(
+            identity=parse_identity(
+                identity_file(
+                    forged_photo,
+                    tag_07="Forged",
+                    tag_11=hashlib.sha1(forged_photo).digest(),
+                )
+            ),
+            address=parse_address(files[CardFile.ADDRESS]),
+            photo=forged_photo,
+            files=files,
+        )
+        report = verify_eid(forged, trusted_roots=[rsa_pki.root_pem])
+        assert not report.content_matches_files
+        assert report.identity_signature_valid
+        assert not report.is_valid
+        assert "does not match the signed files" in report.errors[0]
+
+    def test_from_files(self, rsa_pki: Pki) -> None:
+        eid = EidData.from_files(signed_files(rsa_pki))
+        assert eid.card is None
+        assert eid.photo == PHOTO
+        report = verify_eid(eid, trusted_roots=[rsa_pki.root_pem])
+        assert report.is_valid, report.errors
+        assert report.content_matches_files
+
+    def test_photo_taken_from_files(self, rsa_pki: Pki) -> None:
+        files = signed_files(rsa_pki)
+        eid = replace(EidData.from_files(files), photo=PHOTO + b"x")
+        report = verify_eid(eid, trusted_roots=[rsa_pki.root_pem])
+        assert report.photo_hash_valid is True  # the signed photo file is fine
+        assert not report.content_matches_files
+
+    def test_undecodable_files(self, rsa_pki: Pki) -> None:
+        files = signed_files(rsa_pki)
+        eid = EidData.from_files(files)
+        files[CardFile.IDENTITY] = b"\x01\x09"
+        report = verify_eid(replace(eid, files=files), trusted_roots=[rsa_pki.root_pem])
+        assert not report.content_matches_files
+        assert report.photo_hash_valid is False
+        assert not report.rrn_certificate_period_valid
+        assert "cannot be decoded" in report.errors[0]
+
+    def test_ca_certificate_as_signer(self) -> None:
+        pki = make_pki("rsa", rrn_ca=True, rrn_signing_usage=False)
+        report = verify_eid(_eid(signed_files(pki)), trusted_roots=[pki.root_pem])
+        assert report.identity_signature_valid
+        assert not report.rrn_certificate_trusted
+        assert "not a data signing certificate" in report.errors[0]
+
+    def test_signer_without_signing_usage(self) -> None:
+        pki = make_pki("ec", rrn_ca=None, rrn_signing_usage=False)
+        report = verify_eid(_eid(signed_files(pki)), trusted_roots=[pki.root_pem])
+        assert not report.rrn_certificate_trusted
+
+    def test_signer_without_key_usage(self, rsa_pki: Pki) -> None:
+        from pythonbeid.integrity import _is_data_signer
+
+        certificate = (
+            x509.CertificateBuilder()
+            .subject_name(rsa_pki.rrn.subject)
+            .issuer_name(rsa_pki.root.subject)
+            .public_key(rsa_pki.rrn_key.public_key())
+            .serial_number(2)
+            .not_valid_before(datetime(2020, 1, 1, tzinfo=UTC))
+            .not_valid_after(datetime(2030, 1, 1, tzinfo=UTC))
+            .sign(rsa_pki.root_key, hashes.SHA256())
+        )
+        assert _is_data_signer(certificate)
+
+    @pytest.mark.parametrize("content", [b"\x30\x03abc", bytes(1200), b"garbage"])
+    def test_malformed_rrn_certificate(self, rsa_pki: Pki, content: bytes) -> None:
+        files = signed_files(rsa_pki)
+        files[CardFile.RRN_CERTIFICATE] = content
+        report = verify_eid(_eid(files), trusted_roots=[rsa_pki.root_pem])
+        assert not report.identity_signature_valid
+        assert not report.rrn_certificate_trusted
+        assert "RRN certificate cannot be decoded" in report.errors[0]
+
+    def test_pem_bundle(self, rsa_pki: Pki) -> None:
+        bundle = make_pki("rsa").root_pem + rsa_pki.root_pem
+        report = verify_eid(_eid(signed_files(rsa_pki)), trusted_roots=[bundle])
+        assert report.rrn_certificate_trusted
+
+    def test_basic_key_matches(self, basic_key: ec.EllipticCurvePrivateKey) -> None:
+        from pythonbeid.integrity import basic_key_matches
+
+        der = basic_key.public_key().public_bytes(
+            serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+        digest = hashlib.sha384(der).digest()
+        assert basic_key_matches(der, digest)
+        assert basic_key_matches(der + bytes(8), digest)
+        assert not basic_key_matches(der, bytes(48))
+
+
+def test_unreadable_public_key() -> None:
+    from unittest.mock import MagicMock
+
+    from pythonbeid.integrity import _verify_signature
+
+    certificate = MagicMock()
+    certificate.public_key.side_effect = ValueError("unsupported key")
+    assert _verify_signature(certificate, b"data", b"signature", None) is False

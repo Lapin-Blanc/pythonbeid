@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import base64
 import logging
-import math
 import os
 import time
 import warnings
@@ -79,6 +78,7 @@ _MAX_OFFSET = 0x7FFF  # READ BINARY with a 15-bit offset
 _MAX_6C_RETRIES = 3
 _MAX_GET_RESPONSE = 64
 _CHALLENGE_SIZE = 48  # SHA-384 digest size, as eid-viewer does
+_WAIT_STEP = 1.0  # seconds between two scans of the readers while waiting
 
 _SW_OK = 0x9000
 _SW_EOF_WARNING = 0x6282  # end of file reached before reading Le bytes
@@ -112,6 +112,12 @@ class _Response(NamedTuple):
 
 class _CardResetError(Exception):
     """Internal signal: another application reset the card."""
+
+
+def _repeated_reset() -> CardCommunicationError:
+    return CardCommunicationError(
+        "The card was reset repeatedly by another application"
+    )
 
 
 def _hresult(exc: BaseException) -> int:
@@ -283,10 +289,15 @@ class CardReader:
             names = ", ".join(f"'{item}'" for item in candidates)
             msg = f"No Belgian eID card in reader {names}"
             raise NoCardError(msg)
-        inserted = self._wait_for_card(candidates, timeout)
-        if not self._try_candidates([inserted], explicit=True):
-            msg = f"No card in reader '{inserted}'"
-            raise NoCardError(msg)
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                msg = f"No Belgian eID card inserted within {timeout:g} s"
+                raise NoCardError(msg)
+            self._wait_for_insertion(candidates, min(remaining, _WAIT_STEP))
+            if self._try_candidates(candidates, explicit=explicit):
+                return
 
     def _try_candidates(self, candidates: list[Any], *, explicit: bool) -> bool:
         for candidate in candidates:
@@ -303,8 +314,8 @@ class CardReader:
         return False
 
     def _connect(self, reader: Any) -> None:
-        connection = _wrap_connection(reader.createConnection())
         try:
+            connection = _wrap_connection(reader.createConnection())
             connection.connect(disposition=SCARD_LEAVE_CARD)
         except NoCardException as exc:
             msg = f"No card in reader '{reader}'"
@@ -337,25 +348,21 @@ class CardReader:
         )
 
     @staticmethod
-    def _wait_for_card(candidates: list[Any], timeout: float) -> Any:
-        pyscard_timeout = None if math.isinf(timeout) else timeout
-        request = CardRequest(
-            timeout=pyscard_timeout, readers=candidates, newcardonly=False
-        )
+    def _wait_for_insertion(candidates: list[Any], seconds: float) -> None:
+        """Block until a card is inserted in one of *candidates*, or *seconds*.
+
+        Readers that already hold a card (e.g. a bank card) do not end the
+        wait: only new insertions do, and the caller then retries every
+        reader.
+        """
+        request = CardRequest(timeout=seconds, readers=candidates, newcardonly=True)
         try:
-            service = request.waitforcard()
-        except CardRequestTimeoutException as exc:
-            msg = f"No card inserted within {timeout:g} s"
-            raise NoCardError(msg) from exc
+            request.waitforcard()
+        except CardRequestTimeoutException:
+            return
         except (BaseSCardException, SmartcardException) as exc:
             msg = f"Error while waiting for a card: {exc}"
             raise CardCommunicationError(msg) from exc
-        name = str(service.connection.getReader())
-        for candidate in candidates:
-            if str(candidate) == name:
-                return candidate
-        msg = f"Card inserted in unexpected reader '{name}'"  # pragma: no cover
-        raise NoCardError(msg)  # pragma: no cover
 
     # ── Context manager and properties ───────────────────────────────────
 
@@ -486,7 +493,10 @@ class CardReader:
                 self._call(self._live_connection().lock)
             except _CardResetError:
                 self._reconnect()
-                self._call(self._live_connection().lock)
+                try:
+                    self._call(self._live_connection().lock)
+                except _CardResetError as exc:
+                    raise _repeated_reset() from exc
         self._lock_depth += 1
         try:
             yield
@@ -501,9 +511,17 @@ class CardReader:
     def _reconnect(self) -> None:
         logger.debug("Card was reset by another application, reconnecting")
         connection = self._live_connection()
-        self._call(connection.reconnect, None, None, SCARD_LEAVE_CARD)
-        if self._lock_depth:
-            self._call(connection.lock)
+        try:
+            self._call(connection.reconnect, None, None, SCARD_LEAVE_CARD)
+            if self._lock_depth:
+                self._call(connection.lock)
+        except _CardResetError as exc:
+            self.close()
+            raise _repeated_reset() from exc
+        except BeidError:
+            # pyscard drops the card handle when reconnecting fails.
+            self.close()
+            raise
 
     def _with_reset_retry(self, operation: Callable[[], Any]) -> Any:
         try:
@@ -515,8 +533,7 @@ class CardReader:
             with self._transaction():
                 return operation()
         except _CardResetError as exc:
-            msg = "The card was reset repeatedly by another application"
-            raise CardCommunicationError(msg) from exc
+            raise _repeated_reset() from exc
 
     def _select(self, path: bytes) -> None:
         command = bytes([0x00, 0xA4, 0x08, 0x0C, len(path)]) + path
@@ -632,28 +649,31 @@ class CardReader:
             photo: Read the photo.
             integrity: Also read the files needed by
                 :func:`pythonbeid.verify_eid`: the signatures, the RRN
-                certificate and, on applet 1.8 cards, the basic public key.
+                certificate and, when the identity file references one, the
+                basic public key (applet 1.8).
 
         Returns:
             The decoded content, with the raw files in :attr:`EidData.files`.
         """
-        wanted = [CardFile.IDENTITY, CardFile.ADDRESS]
-        if photo:
-            wanted.append(CardFile.PHOTO)
-        if integrity:
-            wanted += [
-                CardFile.IDENTITY_SIGNATURE,
-                CardFile.ADDRESS_SIGNATURE,
-                CardFile.RRN_CERTIFICATE,
-            ]
-            if self.card_info.has_basic_key:
-                wanted.append(CardFile.BASIC_PUBLIC_KEY)
         with self._transaction():
-            files = {file: self.read_file(file) for file in wanted}
+            files = {CardFile.IDENTITY: self.read_file(CardFile.IDENTITY)}
+            identity = parse_identity(files[CardFile.IDENTITY])
+            wanted = [CardFile.ADDRESS]
+            if photo:
+                wanted.append(CardFile.PHOTO)
+            if integrity:
+                wanted += [
+                    CardFile.IDENTITY_SIGNATURE,
+                    CardFile.ADDRESS_SIGNATURE,
+                    CardFile.RRN_CERTIFICATE,
+                ]
+                if identity.basic_key_hash is not None:
+                    wanted.append(CardFile.BASIC_PUBLIC_KEY)
+            files.update((file, self.read_file(file)) for file in wanted)
         return EidData(
-            card=self.card_info,
-            identity=parse_identity(files[CardFile.IDENTITY]),
+            identity=identity,
             address=parse_address(files[CardFile.ADDRESS]),
+            card=self.card_info,
             photo=files.get(CardFile.PHOTO),
             files=files,
         )
@@ -663,7 +683,7 @@ class CardReader:
 
         This INTERNAL AUTHENTICATE command only exists on applet 1.8 cards
         and needs no PIN. Prefer :meth:`authenticate_chip`, which also checks
-        the answer.
+        the key and the answer.
 
         Args:
             nonce: Data to sign (the official viewer uses 48 random bytes).
@@ -672,14 +692,8 @@ class CardReader:
             The raw ECDSA signature (``r || s``).
 
         Raises:
-            UnsupportedCardError: If the card has no basic key.
+            APDUError: If the card refuses the command (applet 1.7 cards).
         """
-        if not self.card_info.has_basic_key:
-            msg = (
-                f"Applet {self.card_info.applet_version_string} cards have no "
-                "basic key (applet 1.8 or later required)"
-            )
-            raise UnsupportedCardError(msg)
         if not 1 <= len(nonce) <= 253:
             msg = "nonce must be between 1 and 253 bytes"
             raise ValueError(msg)
@@ -689,37 +703,50 @@ class CardReader:
         response = self._with_reset_retry(lambda: self._transmit(command))
         return self._check(response, "INTERNAL AUTHENTICATE")
 
-    def authenticate_chip(self, basic_public_key: bytes | None = None) -> bool:
-        """Prove that the chip is genuine (applet 1.8 only).
+    def authenticate_chip(self, identity: Identity | None = None) -> bool:
+        """Prove that the chip is the genuine one (applet 1.8 cards).
 
-        A random challenge is signed by the chip with its basic private key
-        and the signature is checked with the basic public key. Combined with
-        :func:`pythonbeid.verify_eid`, which checks that this public key is
-        the one signed by the National Register, it detects cloned data.
+        The basic public key file is checked against its digest in the
+        identity file, then the chip must sign a random challenge with the
+        matching private key, which a copy of the card data cannot do.
 
         Args:
-            basic_public_key: Content of :attr:`CardFile.BASIC_PUBLIC_KEY`;
-                read from the card when omitted.
+            identity: The identity whose signed basic key digest is the
+                reference, typically one checked by :func:`verify_eid`
+                (:meth:`verify` does both). Read from the card when omitted;
+                it then proves the chip matches its own identity file, whose
+                signature must be checked separately.
 
         Returns:
-            Whether the chip signature is valid.
+            Whether the key matches its digest and the chip signature is
+            valid.
 
         Raises:
-            UnsupportedCardError: If the card has no basic key.
+            UnsupportedCardError: If the identity file references no basic
+                key (applet 1.7 cards).
             ImportError: If the ``cryptography`` package is not installed.
         """
-        from .integrity import verify_chip_signature  # noqa: PLC0415 - optional
+        from .integrity import (  # noqa: PLC0415 - optional dependency
+            basic_key_matches,
+            verify_chip_signature,
+        )
 
-        if not self.card_info.has_basic_key:
-            msg = (
-                f"Applet {self.card_info.applet_version_string} cards have no "
-                "basic key (applet 1.8 or later required)"
-            )
-            raise UnsupportedCardError(msg)
-        if basic_public_key is None:
-            basic_public_key = self.read_file(CardFile.BASIC_PUBLIC_KEY)
-        nonce = os.urandom(_CHALLENGE_SIZE)
-        return verify_chip_signature(basic_public_key, nonce, self.challenge(nonce))
+        with self._transaction():
+            if identity is None:
+                identity = self.read_identity()
+            if identity.basic_key_hash is None:
+                msg = "This card has no basic key (applet 1.8 or later required)"
+                raise UnsupportedCardError(msg)
+            key_file = self.read_file(CardFile.BASIC_PUBLIC_KEY)
+            if not basic_key_matches(key_file, identity.basic_key_hash):
+                logger.warning("The basic public key does not match its digest")
+                return False
+            nonce = os.urandom(_CHALLENGE_SIZE)
+            signature = self.challenge(nonce)
+        try:
+            return verify_chip_signature(key_file, nonce, signature)
+        except CardDataError:
+            return False
 
     def verify(
         self,
@@ -733,8 +760,9 @@ class CardReader:
         Args:
             eid: Data previously returned by :meth:`read` (with
                 ``integrity=True``); read from the card when omitted.
-            authenticate_chip: On applet 1.8 cards, also run the chip
-                challenge (:meth:`authenticate_chip`).
+            authenticate_chip: When the signed identity file references a
+                basic key (applet 1.8), also run the chip challenge
+                (:meth:`authenticate_chip`).
             trusted_roots: Root certificates (DER or PEM) to trust instead of
                 the bundled Belgian roots.
 
@@ -743,16 +771,24 @@ class CardReader:
 
         Raises:
             ImportError: If the ``cryptography`` package is not installed.
+            NoCardError: If the card is removed during the checks.
         """
         from .integrity import verify_eid  # noqa: PLC0415 - optional dependency
 
         if eid is None:
             eid = self.read(photo=True, integrity=True)
         report = verify_eid(eid, trusted_roots=trusted_roots)
-        if not (authenticate_chip and eid.card.has_basic_key):
+        try:
+            signed = parse_identity(eid.files[CardFile.IDENTITY])
+        except CardDataError:
+            return report  # already reported as failed
+        if not authenticate_chip or signed.basic_key_hash is None:
             return report
-        basic_key = eid.files.get(CardFile.BASIC_PUBLIC_KEY)
-        authenticated = self.authenticate_chip(basic_key)
+        try:
+            authenticated = self.authenticate_chip(signed)
+        except (UnsupportedCardError, APDUError) as exc:
+            logger.warning("Chip challenge refused: %s", exc)
+            authenticated = False
         errors = report.errors
         if not authenticated:
             errors = (*errors, "chip challenge failed: the chip is not genuine")
@@ -794,7 +830,9 @@ class CardReader:
             "nationality": identity.nationality,
             "birth_place": identity.birth_place,
             "birth_date": (
-                _naive_datetime(birth.to_date()) if birth.is_complete else None
+                _naive_datetime(birth.to_date())
+                if birth is not None and birth.is_complete
+                else None
             ),
             "sex": _text(identity.raw.get(0x0D)),
             "address": address.street,

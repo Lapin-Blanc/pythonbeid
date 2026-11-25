@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
@@ -163,29 +165,71 @@ class TestReaderSelection:
 
 
 class TestWaitForCard:
-    class _Service:
-        def __init__(self, name: str) -> None:
-            self.connection = type("C", (), {"getReader": lambda _self: name})()
+    @staticmethod
+    def _request(on_wait: Any, seen: dict[str, Any] | None = None) -> type:
+        class Request:
+            def __init__(self, **kwargs: Any) -> None:
+                if seen is not None:
+                    seen.update(kwargs)
 
-    def test_waits_then_connects(
+            def waitforcard(self) -> None:
+                on_wait()
+
+        return Request
+
+    @staticmethod
+    def _timeout() -> None:
+        raise CardRequestTimeoutException
+
+    @staticmethod
+    def _clock(monkeypatch: pytest.MonkeyPatch, *values: float) -> None:
+        ticks = iter(values)
+        last = [values[-1]]
+
+        def monotonic() -> float:
+            last[0] = next(ticks, last[0])
+            return last[0]
+
+        monkeypatch.setattr("pythonbeid.card_reader.time.monotonic", monotonic)
+
+    def test_waits_for_insertion(
         self, install_readers: Any, card17: FakeCard, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         readers = install_readers(("Slot", None))
         seen: dict[str, Any] = {}
 
-        class Request:
-            def __init__(self, **kwargs: Any) -> None:
-                seen.update(kwargs)
+        def insert() -> None:
+            readers[0].card = card17
 
-            def waitforcard(self) -> Any:
-                readers[0].card = card17  # the card is inserted
-                return TestWaitForCard._Service("Slot")
-
-        monkeypatch.setattr(card_reader_module, "CardRequest", Request)
+        monkeypatch.setattr(
+            card_reader_module, "CardRequest", self._request(insert, seen)
+        )
         with CardReader(timeout=5) as reader:
             assert reader.reader_name == "Slot"
-        assert seen["timeout"] == 5
-        assert seen["newcardonly"] is False
+        assert seen["timeout"] == 1.0  # the readers are rescanned every second
+        assert seen["newcardonly"] is True
+
+    def test_other_card_does_not_end_the_wait(
+        self, install_readers: Any, card17: FakeCard, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A bank card in reader 0 must not hide the eID inserted in reader 1."""
+        bank = FakeCard(files={}, is_beid=False)
+        readers = install_readers(("Bank", bank), ("Slot", None))
+        calls = {"count": 0}
+
+        def insert_later() -> None:
+            calls["count"] += 1
+            if calls["count"] == 2:
+                readers[1].card = card17
+            else:
+                raise CardRequestTimeoutException
+
+        monkeypatch.setattr(
+            card_reader_module, "CardRequest", self._request(insert_later)
+        )
+        with CardReader(timeout=30) as reader:
+            assert reader.reader_name == "Slot"
+        assert calls["count"] == 2
 
     def test_infinite_timeout(
         self, install_readers: Any, card17: FakeCard, monkeypatch: pytest.MonkeyPatch
@@ -193,64 +237,50 @@ class TestWaitForCard:
         readers = install_readers(("Slot", None))
         seen: dict[str, Any] = {}
 
-        class Request:
-            def __init__(self, **kwargs: Any) -> None:
-                seen.update(kwargs)
+        def insert() -> None:
+            readers[0].card = card17
 
-            def waitforcard(self) -> Any:
-                readers[0].card = card17
-                return TestWaitForCard._Service("Slot")
-
-        monkeypatch.setattr(card_reader_module, "CardRequest", Request)
+        monkeypatch.setattr(
+            card_reader_module, "CardRequest", self._request(insert, seen)
+        )
         CardReader(timeout=float("inf")).close()
-        assert seen["timeout"] is None
+        assert seen["timeout"] == 1.0
 
     def test_timeout_expires(
         self, install_readers: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         install_readers(("Slot", None))
-
-        class Request:
-            def __init__(self, **_: Any) -> None:
-                pass
-
-            def waitforcard(self) -> Any:
-                raise CardRequestTimeoutException
-
-        monkeypatch.setattr(card_reader_module, "CardRequest", Request)
+        self._clock(monkeypatch, 100.0, 100.0, 100.3, 100.6)
+        seen: dict[str, Any] = {}
+        monkeypatch.setattr(
+            card_reader_module, "CardRequest", self._request(self._timeout, seen)
+        )
         with pytest.raises(NoCardError, match=r"within 0\.5 s"):
             CardReader(timeout=0.5)
+        assert seen["timeout"] == pytest.approx(0.2)
+
+    def test_explicit_reader_rejects_foreign_card(
+        self, install_readers: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        readers = install_readers(("Slot", None))
+
+        def insert() -> None:
+            readers[0].card = FakeCard(files={}, is_beid=False)
+
+        monkeypatch.setattr(card_reader_module, "CardRequest", self._request(insert))
+        with pytest.raises(UnsupportedCardError):
+            CardReader("Slot", timeout=5)
 
     def test_wait_error(
         self, install_readers: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         install_readers(("Slot", None))
 
-        class Request:
-            def __init__(self, **_: Any) -> None:
-                pass
+        def fail() -> None:
+            raise CardConnectionException("boom")
 
-            def waitforcard(self) -> Any:
-                raise CardConnectionException("boom")
-
-        monkeypatch.setattr(card_reader_module, "CardRequest", Request)
+        monkeypatch.setattr(card_reader_module, "CardRequest", self._request(fail))
         with pytest.raises(CardCommunicationError, match="waiting for a card"):
-            CardReader(timeout=1)
-
-    def test_inserted_card_vanishes(
-        self, install_readers: Any, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        install_readers(("Slot", None))
-
-        class Request:
-            def __init__(self, **_: Any) -> None:
-                pass
-
-            def waitforcard(self) -> Any:
-                return TestWaitForCard._Service("Slot")
-
-        monkeypatch.setattr(card_reader_module, "CardRequest", Request)
-        with pytest.raises(NoCardError, match="No card in reader 'Slot'"):
             CardReader(timeout=1)
 
 
@@ -598,6 +628,7 @@ class TestRead:
         assert eid.identity.last_name == "Specimen"
         assert eid.address.street == "Rue de la Loi 16"
         assert eid.photo == PHOTO
+        assert eid.card is not None
         assert eid.card.applet_version_string == "1.7"
         assert set(eid.files) == {
             CardFile.IDENTITY,
@@ -622,6 +653,7 @@ class TestRead:
         with CardReader() as reader:
             eid = reader.read()
         assert CardFile.BASIC_PUBLIC_KEY in eid.files
+        assert eid.card is not None
         assert eid.card.pin_attempts_left == 3
 
     def test_read_identity_and_address(
@@ -667,10 +699,48 @@ class TestChip:
     ) -> None:
         install_readers(card17)
         with CardReader() as reader:
-            with pytest.raises(UnsupportedCardError, match=r"1\.7"):
+            with pytest.raises(UnsupportedCardError, match="no basic key"):
                 reader.authenticate_chip()
-            with pytest.raises(UnsupportedCardError):
+            with pytest.raises(APDUError):
                 reader.challenge(bytes(48))
+
+    def test_unverified_key_is_rejected(
+        self, install_readers: Any, ec_pki: Pki, basic_key: Any
+    ) -> None:
+        """An impostor serving its own key pair must not pass."""
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+
+        impostor_key = ec.generate_private_key(ec.SECP384R1())
+        files = signed_files(ec_pki, basic_key=basic_key)
+        files[CardFile.BASIC_PUBLIC_KEY] = impostor_key.public_key().public_bytes(
+            serialization.Encoding.DER,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        install_readers(card_from(files, applet=0x18, basic_key=impostor_key))
+        with CardReader() as reader:
+            assert reader.authenticate_chip() is False
+
+    def test_reference_identity(self, install_readers: Any, card18: FakeCard) -> None:
+        install_readers(card18)
+        with CardReader() as reader:
+            identity = reader.read_identity()
+            assert reader.authenticate_chip(identity) is True
+            assert (
+                reader.authenticate_chip(replace(identity, basic_key_hash=bytes(48)))
+                is False
+            )
+
+    def test_garbage_key_file(
+        self, install_readers: Any, ec_pki: Pki, basic_key: Any
+    ) -> None:
+        files = signed_files(ec_pki, basic_key=basic_key)
+        files[CardFile.BASIC_PUBLIC_KEY] = b"\x30\x03abc"
+        identity = identity_file(tag_1A=hashlib.sha384(b"\x30\x03abc").digest())
+        files[CardFile.IDENTITY] = identity
+        install_readers(card_from(files, applet=0x18, basic_key=basic_key))
+        with CardReader() as reader:
+            assert reader.authenticate_chip() is False
 
     @pytest.mark.parametrize("size", [0, 254])
     def test_nonce_size(
@@ -818,3 +888,125 @@ class TestTransactionalConnection:
         with pytest.raises(CardConnectionException) as info:
             getattr(connection, method)()
         assert info.value.hresult == scard.SCARD_W_RESET_CARD
+
+
+class TestReviewFindings:
+    """Regression tests for issues found by an independent review."""
+
+    def test_downgraded_card_data_still_challenged(
+        self, install_readers: Any, ec_pki: Pki, basic_key: Any
+    ) -> None:
+        """A clone claiming applet 1.7 must not skip the chip challenge."""
+        clone = card_from(signed_files(ec_pki, basic_key=basic_key), applet=0x17)
+        install_readers(clone)
+        with CardReader() as reader:
+            eid = reader.read()
+            assert CardFile.BASIC_PUBLIC_KEY in eid.files
+            report = reader.verify(eid, trusted_roots=[ec_pki.root_pem])
+        assert report.basic_key_valid is True
+        assert report.chip_authenticated is False
+        assert not report.is_valid
+
+    def test_missing_key_file_fails_closed(
+        self, install_readers: Any, card18: FakeCard, ec_pki: Pki
+    ) -> None:
+        install_readers(card18)
+        with CardReader() as reader:
+            eid = reader.read()
+            files = dict(eid.files)
+            del files[CardFile.BASIC_PUBLIC_KEY]
+            report = reader.verify(
+                replace(eid, files=files), trusted_roots=[ec_pki.root_pem]
+            )
+        assert report.basic_key_valid is False
+        assert not report.is_valid
+
+    def test_repeated_reset_when_locking(
+        self, install_readers: Any, card17: FakeCard
+    ) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+
+            def lock() -> None:
+                raise reset_error()
+
+            card17.lock = lock  # type: ignore[method-assign]
+            with pytest.raises(CardCommunicationError, match="reset repeatedly"):
+                reader.read()
+
+    def test_reset_while_relocking(
+        self, install_readers: Any, card17: FakeCard
+    ) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+            original = card17.lock
+            calls = {"count": 0}
+
+            def lock() -> None:
+                calls["count"] += 1
+                if calls["count"] > 1:
+                    raise reset_error()
+                original()
+
+            card17.lock = lock  # type: ignore[method-assign]
+            card17.transmit_errors = [reset_error()]
+            with pytest.raises(CardCommunicationError, match="reset repeatedly"):
+                reader.read()
+            assert repr(reader).endswith("closed>")
+
+    def test_failed_reconnect_closes_the_connection(
+        self, install_readers: Any, card17: FakeCard
+    ) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+
+            def reconnect(*_: Any) -> None:
+                raise NoCardException("gone", 0)
+
+            card17.reconnect = reconnect  # type: ignore[method-assign,assignment]
+            card17.transmit_errors = [reset_error()]
+            with pytest.raises(NoCardError):
+                reader.read_identity()
+            with pytest.raises(CardCommunicationError, match="closed"):
+                reader.read_identity()
+
+    def test_create_connection_failure(self, install_readers: Any) -> None:
+        readers = install_readers(("Broken", None))
+
+        def fail() -> Any:
+            raise CardConnectionException("SCardEstablishContext failed")
+
+        readers[0].createConnection = fail
+        with pytest.raises(CardCommunicationError, match="Connection error"):
+            CardReader(0)
+
+    def test_empty_certificate_slot(
+        self, install_readers: Any, card17: FakeCard
+    ) -> None:
+        card17.files[CardFile.SIGNING_CERTIFICATE.path] = bytes(1900)
+        install_readers(card17)
+        with CardReader() as reader, pytest.raises(CardDataError, match="SEQUENCE"):
+            reader.read_certificate(CardFile.SIGNING_CERTIFICATE)
+
+    def test_chip_challenge_refused(
+        self, install_readers: Any, ec_pki: Pki, basic_key: Any
+    ) -> None:
+        card = card_from(signed_files(ec_pki, basic_key=basic_key), applet=0x18)
+        install_readers(card)  # no private key: INTERNAL AUTHENTICATE fails
+        with CardReader() as reader:
+            report = reader.verify(trusted_roots=[ec_pki.root_pem])
+        assert report.chip_authenticated is False
+
+    def test_undecodable_identity_skips_challenge(
+        self, install_readers: Any, card18: FakeCard, ec_pki: Pki
+    ) -> None:
+        install_readers(card18)
+        with CardReader() as reader:
+            eid = reader.read()
+            files = dict(eid.files)
+            files[CardFile.IDENTITY] = b"\x01\x09"
+            report = reader.verify(
+                replace(eid, files=files), trusted_roots=[ec_pki.root_pem]
+            )
+        assert not report.is_valid
+        assert report.chip_authenticated is None

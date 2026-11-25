@@ -165,3 +165,30 @@ def test_module_entry_point(
         runpy.run_module("pythonbeid", run_name="__main__")
     assert info.value.code == 0
     assert "Fake Reader 0" in capsys.readouterr().out
+
+
+def test_non_console_streams_are_left_alone(
+    install_readers: Any, card17: FakeCard, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import io
+
+    out = io.StringIO()
+    install_readers(card17)
+    monkeypatch.setattr("sys.stdout", out)
+    monkeypatch.setattr("sys.stderr", io.StringIO())
+    assert cli.main(["readers"]) == 0
+    assert "Fake Reader 0" in out.getvalue()
+
+
+def test_json_is_ascii(
+    install_readers: Any, rsa_pki: Pki, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from .builders import identity_file, signed_files
+    from .conftest import card_from
+
+    files = signed_files(rsa_pki, identity=identity_file(tag_07="Łukasz Ödön"))
+    install_readers(card_from(files))
+    assert cli.main(["read", "--json"]) == 0
+    out = capsys.readouterr().out
+    assert out.isascii()
+    assert json.loads(out)["identity"]["last_name"] == "Łukasz Ödön"

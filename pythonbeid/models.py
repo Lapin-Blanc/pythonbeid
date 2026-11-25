@@ -286,7 +286,9 @@ class Identity:
         third_given_name_initial: First letter of the third given name.
         nationality: Nationality, in the language of the card.
         birth_place: Place of birth.
-        birth_date: Date of birth (possibly incomplete).
+        birth_date: Date of birth, possibly incomplete; ``None`` when the
+            card holds a format this library does not know (the raw value
+            stays in ``raw[0x0C]``).
         sex: Sex, or ``None`` when the card holds an unexpected value.
         noble_condition: Noble title, if any.
         document_type: Type of document.
@@ -323,7 +325,7 @@ class Identity:
     third_given_name_initial: str
     nationality: str
     birth_place: str
-    birth_date: PartialDate
+    birth_date: PartialDate | None
     sex: Sex | None
     noble_condition: str = ""
     document_type: DocumentType | None = None
@@ -461,21 +463,47 @@ class EidData:
     """Everything read from a card in one go.
 
     Attributes:
-        card: Chip information.
         identity: Identity file content.
         address: Address file content.
+        card: Chip information (GET CARD DATA). It is not signed by the
+            card issuer, so it is informative only; ``None`` when the data
+            was not read from a live card.
         photo: JPEG photo, or ``None`` when it was not read.
         files: Raw content of every file that was read, keyed by file. It is
             what :func:`pythonbeid.verify_eid` checks.
     """
 
-    card: CardInfo
     identity: Identity
     address: Address
+    card: CardInfo | None = None
     photo: bytes | None = field(default=None, repr=False)
     files: Mapping[CardFile, bytes] = field(
         default_factory=_readonly, repr=False, compare=False
     )
+
+    @classmethod
+    def from_files(
+        cls, files: Mapping[CardFile, bytes], card: CardInfo | None = None
+    ) -> EidData:
+        """Decode raw card files, e.g. received by a server from a client.
+
+        Args:
+            files: Raw files; the identity and address files are required.
+            card: Chip information, if known.
+
+        Raises:
+            KeyError: If the identity or address file is missing.
+            CardDataError: If a file cannot be decoded.
+        """
+        from .parser import parse_address, parse_identity  # noqa: PLC0415 - cycle
+
+        return cls(
+            identity=parse_identity(files[CardFile.IDENTITY]),
+            address=parse_address(files[CardFile.ADDRESS]),
+            card=card,
+            photo=files.get(CardFile.PHOTO),
+            files=_readonly(files),
+        )
 
     def to_dict(self, *, include_photo: bool = True) -> dict[str, Any]:
         """Return a JSON-serialisable representation.
@@ -484,7 +512,7 @@ class EidData:
             include_photo: Include the photo as a base-64 string.
         """
         data: dict[str, Any] = {
-            "card": self.card.to_dict(),
+            "card": None if self.card is None else self.card.to_dict(),
             "identity": self.identity.to_dict(),
             "address": self.address.to_dict(),
         }
@@ -506,8 +534,12 @@ class VerificationReport:
         address_signature_valid: The address file is signed by the RRN.
         rrn_certificate_trusted: The RRN certificate chains up to a trusted
             Belgian root certificate.
-        rrn_certificate_valid_at_issuance: The RRN certificate was valid on the
-            first day of validity of the card.
+        rrn_certificate_period_valid: The validity period of the RRN
+            certificate overlaps the validity period of the card. (Cards
+            re-signed after issuance carry a newer certificate, and the
+            certificate of a valid card may have expired since.)
+        content_matches_files: The decoded identity, address and photo are
+            exactly those of the signed raw files.
         basic_key_valid: The basic public key matches its signed digest
             (applet 1.8).
         chip_authenticated: The chip proved it holds the basic private key
@@ -519,7 +551,8 @@ class VerificationReport:
     identity_signature_valid: bool
     address_signature_valid: bool
     rrn_certificate_trusted: bool
-    rrn_certificate_valid_at_issuance: bool
+    rrn_certificate_period_valid: bool
+    content_matches_files: bool = True
     basic_key_valid: bool | None = None
     chip_authenticated: bool | None = None
     errors: tuple[str, ...] = ()
@@ -532,7 +565,8 @@ class VerificationReport:
             self.identity_signature_valid,
             self.address_signature_valid,
             self.rrn_certificate_trusted,
-            self.rrn_certificate_valid_at_issuance,
+            self.rrn_certificate_period_valid,
+            self.content_matches_files,
             self.basic_key_valid,
             self.chip_authenticated,
         )

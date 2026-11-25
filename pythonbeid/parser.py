@@ -152,7 +152,7 @@ def _version(records: Mapping[int, bytes]) -> int | None:
 
 
 def _der_length(data: bytes) -> int:
-    """Total length of the DER object at the start of *data*.
+    """Total length of the DER SEQUENCE at the start of *data*.
 
     Certificates, signatures and keys are stored in files larger than the
     object itself, padded with zero bytes.
@@ -162,6 +162,9 @@ def _der_length(data: bytes) -> int:
     """
     if len(data) < 2:
         msg = "DER object too short"
+        raise CardDataError(msg)
+    if data[0] != 0x30:
+        msg = "not a DER SEQUENCE (empty or invalid file)"
         raise CardDataError(msg)
     first = data[1]
     if first < 0x80:
@@ -190,7 +193,7 @@ def parse_card_date(text: str) -> date:
     try:
         return datetime.strptime(text.strip(), "%d.%m.%Y").date()  # noqa: DTZ007
     except ValueError as exc:
-        msg = f"invalid card date: {text!r}"
+        msg = "invalid card date (DD.MM.YYYY expected)"
         raise CardDataError(msg) from exc
 
 
@@ -203,7 +206,7 @@ def _month(token: str) -> int:
     try:
         return _MONTHS[plain]
     except KeyError:
-        msg = f"unknown month abbreviation: {token!r}"
+        msg = "unknown month abbreviation in birth date"
         raise CardDataError(msg) from None
 
 
@@ -225,37 +228,36 @@ def parse_birth_date(text: str) -> PartialDate:
 
     Raises:
         CardDataError: If the text cannot be interpreted. Unknown month
-            names are rejected instead of being guessed.
+            names are rejected instead of being guessed. The message never
+            contains the date itself, which is personal data.
     """
     tokens = text.replace(".", " ").split()
     try:
         match tokens:
             case [year]:
-                result = PartialDate(_year(year, text))
+                result = PartialDate(_year(year))
             case [first, year] if first.isdigit():
                 # A day without a month carries no information.
-                result = PartialDate(_year(year, text))
+                result = PartialDate(_year(year))
             case [month, year]:
-                result = PartialDate(_year(year, text), _month(month))
+                result = PartialDate(_year(year), _month(month))
             case [day, month, year] if day.isdigit():
                 day_value = int(day)
-                result = PartialDate(
-                    _year(year, text), _month(month), day_value or None
-                )
+                result = PartialDate(_year(year), _month(month), day_value or None)
             case _:
-                msg = f"unexpected birth date format: {text!r}"
+                msg = "unexpected birth date format"
                 raise CardDataError(msg)
     except CardDataError:
         raise
     except ValueError as exc:
-        msg = f"invalid birth date: {text!r}"
+        msg = "invalid birth date"
         raise CardDataError(msg) from exc
     return result
 
 
-def _year(token: str, text: str) -> int:
+def _year(token: str) -> int:
     if not re.fullmatch(r"\d{4}", token):
-        msg = f"invalid year in date: {text!r}"
+        msg = "invalid year in birth date"
         raise CardDataError(msg)
     return int(token)
 
@@ -269,7 +271,7 @@ def _sex(value: str) -> Sex | None:
         return Sex.MALE
     if letter in _FEMALE_LETTERS:
         return Sex.FEMALE
-    logger.warning("Unexpected sex value on card: %r", value)
+    logger.warning("Unexpected value in the sex field (tag 0x0D) ignored")
     return None
 
 
@@ -291,6 +293,14 @@ def _optional_card_date(records: Mapping[int, bytes], tag: int) -> date | None:
         return parse_card_date(text)
     except CardDataError:
         logger.warning("Invalid date in tag 0x%02X ignored", tag)
+        return None
+
+
+def _birth_date(text: str) -> PartialDate | None:
+    try:
+        return parse_birth_date(text)
+    except CardDataError as exc:
+        logger.warning("Birth date not decoded (%s); see Identity.raw[0x0C]", exc)
         return None
 
 
@@ -336,7 +346,7 @@ def parse_identity(data: bytes) -> Identity:
         third_given_name_initial=_text(records.get(0x09)),
         nationality=_text(records.get(0x0A)),
         birth_place=_text(records.get(0x0B)),
-        birth_date=parse_birth_date(_required(records, 0x0C, "birth date")),
+        birth_date=_birth_date(_required(records, 0x0C, "birth date")),
         sex=_sex(_text(records.get(0x0D))),
         noble_condition=_text(records.get(0x0E)),
         document_type=_document_type(records),

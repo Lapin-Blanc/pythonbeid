@@ -229,7 +229,8 @@ class TestParseIdentity:
     def test_unexpected_sex(self, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level(logging.WARNING):
             assert parse_identity(identity_file(tag_0D="X")).sex is None
-        assert "Unexpected sex value" in caplog.text
+        assert "Unexpected value in the sex field" in caplog.text
+        assert "'X'" not in caplog.text  # card values are never logged
 
     def test_values_are_trimmed(self) -> None:
         identity = parse_identity(
@@ -336,6 +337,7 @@ class TestParseIdentity:
 
     def test_incomplete_birth_date(self) -> None:
         birth = parse_identity(identity_file(tag_0C="    1984")).birth_date
+        assert birth is not None
         assert not birth.is_complete
         assert str(birth) == "1984"
 
@@ -450,3 +452,33 @@ class TestDeprecatedParsers:
             pytest.raises(ValueError, match="incomplete date"),
         ):
             parse_french_date("1984")
+
+
+class TestPrivacyAndLeniency:
+    """Card values never appear in messages; odd birth dates do not fail."""
+
+    @pytest.mark.parametrize(
+        "text", ["17 XYZ 1983", "1983-05-17", "17 MEI 83", "31 FEV 1983"]
+    )
+    def test_birth_date_errors_do_not_echo_the_date(self, text: str) -> None:
+        with pytest.raises(CardDataError) as info:
+            parse_birth_date(text)
+        assert "17" not in str(info.value)
+        assert "1983" not in str(info.value)
+
+    def test_card_date_error_does_not_echo_the_date(self) -> None:
+        with pytest.raises(CardDataError) as info:
+            parse_card_date("99.99.2031")
+        assert "2031" not in str(info.value)
+
+    def test_unknown_birth_date_format(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level(logging.WARNING):
+            identity = parse_identity(identity_file(tag_0C="17/05/1983"))
+        assert identity.birth_date is None
+        assert identity.raw[0x0C] == b"17/05/1983"
+        assert "Birth date not decoded" in caplog.text
+        assert "1983" not in caplog.text
+
+    def test_der_requires_a_sequence(self) -> None:
+        with pytest.raises(CardDataError, match="SEQUENCE"):
+            _der_length(bytes(10))

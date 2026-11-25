@@ -115,8 +115,11 @@ def _certificate(  # noqa: PLR0917 - private test helper
     not_before: datetime,
     not_after: datetime,
     signature_hash: hashes.SHA256 | hashes.SHA384,
+    *,
+    ca: bool | None = None,
+    signing_usage: bool = True,
 ) -> x509.Certificate:
-    return (
+    builder = (
         x509.CertificateBuilder()
         .subject_name(_name(subject))
         .issuer_name(_name(issuer))
@@ -124,8 +127,26 @@ def _certificate(  # noqa: PLR0917 - private test helper
         .serial_number(x509.random_serial_number())
         .not_valid_before(not_before)
         .not_valid_after(not_after)
-        .sign(issuer_key, signature_hash)
     )
+    if ca is not None:
+        builder = builder.add_extension(
+            x509.BasicConstraints(ca=ca, path_length=None), critical=True
+        )
+    builder = builder.add_extension(
+        x509.KeyUsage(
+            digital_signature=signing_usage,
+            content_commitment=signing_usage,
+            key_encipherment=False,
+            data_encipherment=False,
+            key_agreement=False,
+            key_cert_sign=not signing_usage,
+            crl_sign=False,
+            encipher_only=False,
+            decipher_only=False,
+        ),
+        critical=True,
+    )
+    return builder.sign(issuer_key, signature_hash)
 
 
 @dataclass
@@ -168,6 +189,8 @@ def make_pki(
     *,
     rrn_not_before: datetime | None = None,
     rrn_not_after: datetime | None = None,
+    rrn_ca: bool | None = False,
+    rrn_signing_usage: bool = True,
 ) -> Pki:
     now = datetime.now(UTC)
     root_key, rrn_key = _key(kind), _key(kind)
@@ -182,7 +205,7 @@ def make_pki(
         "RRN", rrn_key, "Test Root CA", root_key,
         rrn_not_before or datetime(2020, 1, 1, tzinfo=UTC),
         rrn_not_after or datetime(2030, 1, 1, tzinfo=UTC),
-        digest,
+        digest, ca=rrn_ca, signing_usage=rrn_signing_usage,
     )  # fmt: skip
     return Pki(kind, root_key, root, rrn_key, rrn)
 

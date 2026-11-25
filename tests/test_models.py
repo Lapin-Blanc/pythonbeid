@@ -141,6 +141,13 @@ class TestSerialisation:
         assert data["card"]["applet_version_string"] == "1.7"
         assert base64.b64decode(data["photo"]) == PHOTO
 
+    def test_eid_without_card(self) -> None:
+        eid = EidData(
+            identity=parse_identity(identity_file()),
+            address=parse_address(address_file()),
+        )
+        assert eid.to_dict()["card"] is None
+
     def test_eid_to_dict_without_photo(self) -> None:
         assert "photo" not in _eid().to_dict(include_photo=False)
 
@@ -156,7 +163,7 @@ class TestSerialisation:
             identity_signature_valid=True,
             address_signature_valid=False,
             rrn_certificate_trusted=True,
-            rrn_certificate_valid_at_issuance=True,
+            rrn_certificate_period_valid=True,
             errors=("the address signature is invalid",),
         )
         data = report.to_dict()
@@ -172,7 +179,7 @@ class TestVerificationReport:
             "identity_signature_valid": True,
             "address_signature_valid": True,
             "rrn_certificate_trusted": True,
-            "rrn_certificate_valid_at_issuance": True,
+            "rrn_certificate_period_valid": True,
         }
         values.update(overrides)
         return VerificationReport(**values)  # type: ignore[arg-type]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import logging
 import sys
@@ -118,9 +119,8 @@ def _read(args: argparse.Namespace) -> int:
     if args.photo is not None and eid.photo is not None:
         args.photo.write_bytes(eid.photo)
     if args.json:
-        print(
-            json.dumps(eid.to_dict(include_photo=False), indent=2, ensure_ascii=False)
-        )
+        # ASCII escapes keep the JSON lossless whatever the console encoding.
+        print(json.dumps(eid.to_dict(include_photo=False), indent=2))
     else:
         _print_section("Identity", eid.identity.to_dict())
         _print_section("Address", eid.address.to_dict())
@@ -151,9 +151,17 @@ def _verify(args: argparse.Namespace) -> int:
 _VERDICTS = {True: "ok", False: "FAILED", None: "not applicable"}
 
 
+def _tolerate_console_encoding() -> None:
+    """Avoid crashing on names a legacy console code page cannot encode."""
+    for stream in (sys.stdout, sys.stderr):
+        if isinstance(stream, io.TextIOWrapper):
+            stream.reconfigure(errors="replace")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the command line and return the exit status."""
     args = _build_parser().parse_args(argv)
+    _tolerate_console_encoding()
     level = {0: logging.WARNING, 1: logging.INFO}.get(args.verbose, logging.DEBUG)
     logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s")
     try:
