@@ -91,7 +91,7 @@ Reading speed depends on the reader: `read()` takes about 9 s on an old
 | `first_names` | `str` | the first two given names only |
 | `third_given_name_initial` | `str` | `given_names` joins both |
 | `nationality`, `birth_place` | `str` | in the language of the card |
-| `birth_date` | `PartialDate` | `.to_date()`; year or month may be unknown |
+| `birth_date` | `PartialDate \| None` | `.to_date()`; year or month may be unknown; `None` for an unknown format (raw value in `raw[0x0C]`) |
 | `sex` | `Sex \| None` | `Sex.MALE` / `Sex.FEMALE` |
 | `noble_condition` | `str` | |
 | `document_type` | `DocumentType \| None` | `.description`, `.is_kids_card`, `.is_foreigner_card` |
@@ -120,18 +120,30 @@ with CardReader() as reader:
 | `photo_hash_valid` | the photo matches the digest in the identity file |
 | `identity_signature_valid` | the identity file is signed by the National Register (RRN) |
 | `address_signature_valid` | the address file is signed by the RRN (and bound to the identity signature) |
-| `rrn_certificate_trusted` | the RRN certificate is issued by a bundled Belgian root CA |
-| `rrn_certificate_valid_at_issuance` | the RRN certificate was valid when the card was issued |
+| `rrn_certificate_trusted` | the RRN certificate is an end-entity signing certificate issued by a bundled Belgian root CA |
+| `rrn_certificate_period_valid` | the RRN certificate validity overlaps the card validity |
+| `content_matches_files` | the decoded identity, address and photo are those of the signed files |
 | `basic_key_valid` | applet 1.8: the chip public key is the one signed by the RRN |
 | `chip_authenticated` | applet 1.8: the chip signed a random challenge with its private key |
 
-A check that does not apply is `None`. The RRN certificate is checked at the
-date the card was issued, not today: RRN certificates of valid cards may have
-expired since.
+A check that does not apply is `None`. The RRN certificate is not required to
+be valid today: certificates of valid cards may have expired since, and cards
+re-signed after issuance carry a newer one. Whether a card has a basic key is
+decided by the signed identity file, never by the unsigned chip information,
+so a clone cannot avoid the chip challenge by claiming an older applet.
 
-Data read earlier can be checked offline with
-`pythonbeid.verify_eid(eid)`; the chip challenge needs the live card
-(`reader.authenticate_chip()`).
+Raw files can be checked offline, for instance on a server receiving them
+from a client:
+
+```python
+from pythonbeid import EidData, verify_eid
+
+eid = EidData.from_files(files)        # {CardFile: bytes}
+report = verify_eid(eid)               # everything is checked on the raw files
+```
+
+The chip challenge needs the live card: `reader.authenticate_chip(identity)`
+checks the chip against an identity file whose signature you verified.
 
 Bundled trust anchors, downloaded from `certs.eid.belgium.be` and
 `crt.eidpki.belgium.be` (SHA-256):

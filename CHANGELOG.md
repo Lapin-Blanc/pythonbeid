@@ -19,9 +19,13 @@ All notable changes to this project are documented here. The format follows
   `SpecialStatus` enums, `is_valid_national_number()`.
 - Authenticity checks (`pip install "pythonbeid[verify]"`): photo digest,
   identity and address signatures (RSA and ECDSA), RRN certificate chain to
-  the bundled Belgian roots CA2, CA3, CA4 and CA6, basic key and chip
-  challenge on applet 1.8 cards. `CardReader.verify()`, `verify_eid()`,
-  `verify_photo()`.
+  the bundled Belgian roots CA2, CA3, CA4 and CA6 (end-entity signing
+  certificate only), consistency of the decoded data with the signed files,
+  basic key and chip challenge on applet 1.8 cards. `CardReader.verify()`,
+  `CardReader.authenticate_chip()`, `verify_eid()`, `verify_photo()`,
+  `basic_key_matches()`.
+- `EidData.from_files()` to decode and verify raw files received from
+  elsewhere (e.g. on a server).
 - Reader selection by index, name or substring; automatic selection of the
   reader holding a Belgian eID card; `timeout` to wait for a card.
 - Command line: `pythonbeid readers | info | read | verify` and
@@ -29,6 +33,7 @@ All notable changes to this project are documented here. The format follows
 - `py.typed` marker, `__version__`, `CardFile` enum of the card files.
 - `BeidError` base exception, `PCSCServiceError`, `UnsupportedCardError`,
   `CardDataError`; `APDUError.sw`.
+- Card values (names, dates...) never appear in log or exception messages.
 
 ### Fixed
 
