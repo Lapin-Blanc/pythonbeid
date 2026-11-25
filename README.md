@@ -186,6 +186,27 @@ All exceptions derive from `pythonbeid.BeidError`:
 | `APDUError` | the card refused a command (`.sw` holds the status word) |
 | `CardDataError` | card content cannot be decoded (also a `ValueError`) |
 
+## Troubleshooting
+
+**`CardInUseError`: the card is used exclusively by another application.**
+The usual culprit on developer machines is GnuPG's `scdaemon` (shipped with
+Git for Windows and GPG suites): it grabs PC/SC readers exclusively as soon
+as any program asks GnuPG about smart cards, and it is restarted on demand.
+
+- Free the card now: `gpgconf --kill scdaemon`.
+- Fix it for good: add `pcsc-shared` to `scdaemon.conf`, or `disable-scdaemon`
+  to `gpg-agent.conf` if you do not use OpenPGP cards, in the GnuPG home
+  directory (`gpgconf --list-dirs homedir`), then run
+  `gpgconf --kill scdaemon`.
+
+The eID middleware may also hold the card while a browser authenticates.
+
+**`PCSCServiceError` on Linux**: start the PC/SC daemon with
+`sudo systemctl enable --now pcscd`.
+
+**`NoCardError` although a card is inserted**: check the card orientation and
+run `pythonbeid readers`; with several readers, pass `--reader`.
+
 ## Migrating from 0.x
 
 The 0.x API still works and emits a `DeprecationWarning`:
