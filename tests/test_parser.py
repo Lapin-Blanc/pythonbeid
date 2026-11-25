@@ -109,18 +109,22 @@ GERMAN = ["JAN", "FEB", "MÄR", "APR", "MAI", "JUN", "JUL", "AUG", "SEP", "OKT",
 
 
 class TestParseBirthDate:
-    @pytest.mark.parametrize(("month", "abbreviation"), enumerate(FRENCH, start=1))
+    @pytest.mark.parametrize(
+        ("month", "abbreviation"), list(enumerate(FRENCH, start=1))
+    )
     def test_french(self, month: int, abbreviation: str) -> None:
         text = f"15 {abbreviation:<4} 1980"  # month field padded to 4 characters
         assert parse_birth_date(text) == PartialDate(1980, month, 15)
 
-    @pytest.mark.parametrize(("month", "abbreviation"), enumerate(DUTCH, start=1))
+    @pytest.mark.parametrize(("month", "abbreviation"), list(enumerate(DUTCH, start=1)))
     def test_dutch(self, month: int, abbreviation: str) -> None:
         assert parse_birth_date(f"15 {abbreviation} 1980") == PartialDate(
             1980, month, 15
         )
 
-    @pytest.mark.parametrize(("month", "abbreviation"), enumerate(GERMAN, start=1))
+    @pytest.mark.parametrize(
+        ("month", "abbreviation"), list(enumerate(GERMAN, start=1))
+    )
     @pytest.mark.parametrize("layout", ["{d}.{m}.{y}", "{d}.{m}. {y}"])
     def test_german(self, month: int, abbreviation: str, layout: str) -> None:
         text = layout.format(d="15", m=abbreviation, y="1980")
