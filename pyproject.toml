@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pythonbeid"
-version = "1.0.1"
+version = "1.0.2"
 description = "Read and verify Belgian eID cards (identity, address, photo) through PC/SC"
 readme = "README.md"
 license = "MIT"

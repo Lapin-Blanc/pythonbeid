@@ -38,8 +38,11 @@ from smartcard.Exceptions import (
 )
 from smartcard.pcsc.PCSCExceptions import BaseSCardException
 from smartcard.scard import (
+    SCARD_E_COMM_DATA_LOST,
     SCARD_E_NO_SMARTCARD,
+    SCARD_E_NOT_TRANSACTED,
     SCARD_E_SHARING_VIOLATION,
+    SCARD_F_COMM_ERROR,
     SCARD_LEAVE_CARD,
     SCARD_S_SUCCESS,
     SCARD_W_REMOVED_CARD,
@@ -108,6 +111,22 @@ _CARD_ABSENT_CODES = frozenset(
 )
 _CARD_RESET_CODE = SCARD_W_RESET_CARD & _UINT32
 _SHARING_VIOLATION_CODE = SCARD_E_SHARING_VIOLATION & _UINT32
+# Transient transmission failures. eid-mw recovers from the first two; the
+# Windows generic CCID driver reports ERROR_IO_DEVICE (a Win32 code) about
+# once every few hundred commands with some readers.
+_ERROR_IO_DEVICE = 0x0000045D
+_TRANSIENT_CODES = frozenset(
+    code & _UINT32
+    for code in (
+        SCARD_E_COMM_DATA_LOST,
+        SCARD_E_NOT_TRANSACTED,
+        SCARD_F_COMM_ERROR,
+        _ERROR_IO_DEVICE,
+    )
+)
+_TRANSMIT_ATTEMPTS = 3
+_TRANSMIT_RETRY_DELAY = 0.02
+_GET_RESPONSE = 0xC0
 
 
 class _Response(NamedTuple):
@@ -116,12 +135,21 @@ class _Response(NamedTuple):
 
 
 class _CardResetError(Exception):
-    """Internal signal: another application reset the card."""
+    """Internal signal: the connection must be re-established.
+
+    Raised when another application reset the card, or when transmission
+    errors persist; the operation is then retried once after reconnecting.
+    """
+
+
+class _TransientError(_CardResetError):
+    """Internal signal: a transmission failed and may succeed if repeated."""
 
 
 def _repeated_reset() -> CardCommunicationError:
     return CardCommunicationError(
-        "The card was reset repeatedly by another application"
+        "Communication with the card failed repeatedly (card reset by another "
+        "application, or transmission errors with the reader)"
     )
 
 
@@ -474,11 +502,29 @@ class CardReader:
                 raise NoCardError(msg) from exc
             if code == _CARD_RESET_CODE:
                 raise _CardResetError from exc
+            if code in _TRANSIENT_CODES:
+                raise _TransientError from exc
             msg = f"Communication error with the card: {exc}"
             raise CardCommunicationError(msg) from exc
 
     def _transmit_once(self, apdu: bytes) -> _Response:
-        data, sw1, sw2 = self._call(self._live_connection().transmit, list(apdu))
+        # Repeating a command after a transmission error is harmless (SELECT,
+        # READ BINARY, GET CARD DATA...), except GET RESPONSE whose data may
+        # already be consumed: that one is recovered by replaying the whole
+        # operation (_with_reset_retry).
+        attempts = 1 if apdu[1] == _GET_RESPONSE else _TRANSMIT_ATTEMPTS
+        for attempt in range(1, attempts + 1):
+            try:
+                data, sw1, sw2 = self._call(
+                    self._live_connection().transmit, list(apdu)
+                )
+            except _TransientError:
+                if attempt == attempts:
+                    raise
+                logger.debug("Transmission error, repeating the command")
+                time.sleep(_TRANSMIT_RETRY_DELAY)
+            else:
+                break
         response = _Response(bytes(data), (sw1 << 8) | sw2)
         logger.debug(
             "APDU %s (%d bytes) -> SW=%04X, %d bytes",

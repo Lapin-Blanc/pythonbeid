@@ -593,7 +593,7 @@ class TestTransactions:
         install_readers(card17)
         with CardReader() as reader:
             card17.transmit_errors = [reset_error(), reset_error()]
-            with pytest.raises(CardCommunicationError, match="reset repeatedly"):
+            with pytest.raises(CardCommunicationError, match="failed repeatedly"):
                 reader.read_identity()
 
     def test_card_removed(self, install_readers: Any, card17: FakeCard) -> None:
@@ -932,7 +932,7 @@ class TestReviewFindings:
                 raise reset_error()
 
             card17.lock = lock  # type: ignore[method-assign]
-            with pytest.raises(CardCommunicationError, match="reset repeatedly"):
+            with pytest.raises(CardCommunicationError, match="failed repeatedly"):
                 reader.read()
 
     def test_reset_while_relocking(
@@ -951,7 +951,7 @@ class TestReviewFindings:
 
             card17.lock = lock  # type: ignore[method-assign]
             card17.transmit_errors = [reset_error()]
-            with pytest.raises(CardCommunicationError, match="reset repeatedly"):
+            with pytest.raises(CardCommunicationError, match="failed repeatedly"):
                 reader.read()
             assert repr(reader).endswith("closed>")
 
@@ -1087,3 +1087,74 @@ class TestCardInUse:
         )
         with pytest.raises(CardInUseError):
             CardReader(timeout=2)
+
+
+class TestTransientErrors:
+    """Transmission errors seen with the Windows generic CCID driver."""
+
+    @staticmethod
+    def _io_error() -> CardConnectionException:
+        return CardConnectionException("I/O device error", hresult=0x45D)
+
+    def test_command_repeated(
+        self, install_readers: Any, card17: FakeCard, no_sleep: list[float]
+    ) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+            card17.transmit_errors = [self._io_error()]
+            assert reader.read_photo() == PHOTO
+        assert card17.reconnect_calls == 0
+        assert no_sleep == [0.02]
+
+    @pytest.mark.parametrize(
+        "code",
+        [
+            scard.SCARD_E_COMM_DATA_LOST,
+            scard.SCARD_E_NOT_TRANSACTED,
+            scard.SCARD_F_COMM_ERROR,
+        ],
+    )
+    def test_pcsc_transient_codes(
+        self, install_readers: Any, card17: FakeCard, no_sleep: list[float], code: int
+    ) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+            card17.transmit_errors = [CardConnectionException("lost", hresult=code)]
+            assert reader.read_identity().last_name == "Specimen"
+
+    def test_persistent_errors_replay_the_operation(
+        self, install_readers: Any, card17: FakeCard, no_sleep: list[float]
+    ) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+            card17.transmit_errors = [self._io_error() for _ in range(3)]
+            assert reader.read_photo() == PHOTO
+        assert card17.reconnect_calls == 1
+
+    def test_get_response_is_not_repeated(
+        self, install_readers: Any, card17: FakeCard, no_sleep: list[float]
+    ) -> None:
+        card17.get_response_mode = True
+        install_readers(card17)
+        with CardReader() as reader:
+            sent: list[int] = []
+            original = card17.transmit
+
+            def transmit(apdu: list[int]) -> tuple[list[int], int, int]:
+                sent.append(apdu[1])
+                if apdu[1] == 0xC0 and sent.count(0xC0) == 1:
+                    raise self._io_error()
+                return original(apdu)
+
+            card17.transmit = transmit  # type: ignore[method-assign]
+            assert reader.read_identity().last_name == "Specimen"
+        assert card17.reconnect_calls == 1
+
+    def test_unrecoverable(
+        self, install_readers: Any, card17: FakeCard, no_sleep: list[float]
+    ) -> None:
+        install_readers(card17)
+        with CardReader() as reader:
+            card17.transmit_errors = [self._io_error() for _ in range(6)]
+            with pytest.raises(CardCommunicationError, match="transmission errors"):
+                reader.read_identity()

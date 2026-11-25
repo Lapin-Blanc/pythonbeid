@@ -4,7 +4,15 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [1.0.2] - 2026-11-25
+
+### Fixed
+
+- Transient transmission errors made reading fail with some readers (about
+  one command in two hundred with a reader using the Windows generic CCID
+  driver, `ERROR_IO_DEVICE`). The command is now repeated, and the whole
+  operation replayed after reconnecting if errors persist, as the official
+  middleware does for `SCARD_E_COMM_DATA_LOST` and `SCARD_E_NOT_TRANSACTED`.
 
 ### Changed
 
@@ -110,6 +118,7 @@ All notable changes to this project are documented here. The format follows
 
 - First release on PyPI: identity, address and photo reading.
 
+[1.0.2]: https://github.com/Lapin-Blanc/pythonbeid/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/Lapin-Blanc/pythonbeid/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Lapin-Blanc/pythonbeid/compare/v0.3.0...v1.0.0
 [0.3.0]: https://github.com/Lapin-Blanc/pythonbeid/releases/tag/v0.3.0
