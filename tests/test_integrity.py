@@ -474,3 +474,24 @@ def test_unreadable_public_key() -> None:
     certificate = MagicMock()
     certificate.public_key.side_effect = ValueError("unsupported key")
     assert _verify_signature(certificate, b"data", b"signature", None) is False
+
+
+def test_unpadded_ec_signature_files(
+    ec_pki: Pki, basic_key: ec.EllipticCurvePrivateKey
+) -> None:
+    """Real applet 1.8 cards store signatures without zero padding."""
+    from .builders import address_file
+
+    files = signed_files(ec_pki, basic_key=basic_key)
+    assert isinstance(ec_pki.rrn_key, ec.EllipticCurvePrivateKey)
+    identity_signature = ec_pki.rrn_key.sign(
+        files[CardFile.IDENTITY], ec.ECDSA(hashes.SHA384())
+    )
+    address = address_file(padding=72)
+    files[CardFile.IDENTITY_SIGNATURE] = identity_signature
+    files[CardFile.ADDRESS] = address
+    files[CardFile.ADDRESS_SIGNATURE] = ec_pki.rrn_key.sign(
+        address.rstrip(b"\x00") + identity_signature, ec.ECDSA(hashes.SHA384())
+    )
+    report = verify_eid(_eid(files, applet=0x18), trusted_roots=[ec_pki.root_pem])
+    assert report.is_valid, report.errors
