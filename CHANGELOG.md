@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.1] - 2026-11-25
+
+### Fixed
+
+- A card held exclusively by another application (for instance the eID
+  middleware during a browser authentication) was reported as missing.
+  The connection is now retried for one second, then fails with the new
+  `CardInUseError`, which says so.
+
 ## [1.0.0] - 2026-11-25
 
 ### Added
@@ -94,6 +103,7 @@ All notable changes to this project are documented here. The format follows
 
 - First release on PyPI: identity, address and photo reading.
 
+[1.0.1]: https://github.com/Lapin-Blanc/pythonbeid/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Lapin-Blanc/pythonbeid/compare/v0.3.0...v1.0.0
 [0.3.0]: https://github.com/Lapin-Blanc/pythonbeid/releases/tag/v0.3.0
 [0.2.0]: https://pypi.org/project/pythonbeid/0.2.0/

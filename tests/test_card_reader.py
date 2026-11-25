@@ -23,6 +23,7 @@ from pythonbeid import (
     CardCommunicationError,
     CardDataError,
     CardFile,
+    CardInUseError,
     CardReader,
     NoCardError,
     NoReaderError,
@@ -1010,3 +1011,79 @@ class TestReviewFindings:
             )
         assert not report.is_valid
         assert report.chip_authenticated is None
+
+
+class TestCardInUse:
+    """A card held exclusively by another application (SCARD_E_SHARING_VIOLATION)."""
+
+    @staticmethod
+    def _busy() -> CardConnectionException:
+        return CardConnectionException(
+            "in use", hresult=scard.SCARD_E_SHARING_VIOLATION
+        )
+
+    def test_retried_until_released(
+        self, install_readers: Any, card17: FakeCard, no_sleep: list[float]
+    ) -> None:
+        attempts = {"count": 0}
+        original = card17.connect
+
+        def connect(*args: Any, **kwargs: Any) -> None:
+            attempts["count"] += 1
+            if attempts["count"] < 3:
+                raise self._busy()
+            original(*args, **kwargs)
+
+        card17.connect = connect  # type: ignore[method-assign]
+        install_readers(card17)
+        with CardReader() as reader:
+            assert reader.read_identity().last_name == "Specimen"
+        assert attempts["count"] == 3
+        assert no_sleep == [0.5, 0.5]
+
+    def test_explicit_reader(
+        self, install_readers: Any, card17: FakeCard, no_sleep: list[float]
+    ) -> None:
+        card17.connect_error = self._busy()
+        install_readers(("ACS ACR38U 0", card17))
+        with pytest.raises(CardInUseError, match="used exclusively by another"):
+            CardReader(0)
+        assert len(no_sleep) == 2
+
+    def test_automatic_selection_reports_it(
+        self, install_readers: Any, card17: FakeCard, no_sleep: list[float]
+    ) -> None:
+        card17.connect_error = self._busy()
+        install_readers(("Empty", None), ("Busy", card17))
+        with pytest.raises(CardInUseError, match="'Busy'"):
+            CardReader()
+
+    def test_automatic_selection_prefers_a_free_card(
+        self,
+        install_readers: Any,
+        card17: FakeCard,
+        card18: FakeCard,
+        no_sleep: list[float],
+    ) -> None:
+        card17.connect_error = self._busy()
+        install_readers(("Busy", card17), ("Free", card18))
+        with CardReader() as reader:
+            assert reader.reader_name == "Free"
+
+    def test_reported_after_waiting(
+        self,
+        install_readers: Any,
+        card17: FakeCard,
+        no_sleep: list[float],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        card17.connect_error = self._busy()
+        install_readers(("Busy", card17))
+        TestWaitForCard._clock(monkeypatch, 0.0, 0.0, 5.0)
+        monkeypatch.setattr(
+            card_reader_module,
+            "CardRequest",
+            TestWaitForCard._request(TestWaitForCard._timeout),
+        )
+        with pytest.raises(CardInUseError):
+            CardReader(timeout=2)

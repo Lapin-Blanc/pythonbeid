@@ -181,6 +181,7 @@ All exceptions derive from `pythonbeid.BeidError`:
 | `PCSCServiceError` | the PC/SC service is not running (subclass of `NoReaderError`) |
 | `NoCardError` | no card in the reader, or the card was removed |
 | `UnsupportedCardError` | the card is not a Belgian eID card, or lacks a feature |
+| `CardInUseError` | another application holds the card exclusively (subclass of `CardCommunicationError`) |
 | `CardCommunicationError` | transport failure |
 | `APDUError` | the card refused a command (`.sw` holds the status word) |
 | `CardDataError` | card content cannot be decoded (also a `ValueError`) |

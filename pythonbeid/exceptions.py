@@ -11,6 +11,7 @@ __all__ = [
     "BeidError",
     "CardCommunicationError",
     "CardDataError",
+    "CardInUseError",
     "NoCardError",
     "NoReaderError",
     "PCSCServiceError",
@@ -40,6 +41,14 @@ class NoCardError(BeidError):
 
 class CardCommunicationError(BeidError):
     """Raised on a failure while talking to the card."""
+
+
+class CardInUseError(CardCommunicationError):
+    """Raised when another application holds the card exclusively.
+
+    Typical causes: the eID middleware or a browser in the middle of an
+    authentication. Closing that application or retrying later helps.
+    """
 
 
 class APDUError(CardCommunicationError):

@@ -39,6 +39,7 @@ from smartcard.Exceptions import (
 from smartcard.pcsc.PCSCExceptions import BaseSCardException
 from smartcard.scard import (
     SCARD_E_NO_SMARTCARD,
+    SCARD_E_SHARING_VIOLATION,
     SCARD_LEAVE_CARD,
     SCARD_S_SUCCESS,
     SCARD_W_REMOVED_CARD,
@@ -54,6 +55,7 @@ from .exceptions import (
     BeidError,
     CardCommunicationError,
     CardDataError,
+    CardInUseError,
     NoCardError,
     NoReaderError,
     PCSCServiceError,
@@ -79,6 +81,8 @@ _MAX_6C_RETRIES = 3
 _MAX_GET_RESPONSE = 64
 _CHALLENGE_SIZE = 48  # SHA-384 digest size, as eid-viewer does
 _WAIT_STEP = 1.0  # seconds between two scans of the readers while waiting
+_SHARING_ATTEMPTS = 3  # eid-mw also retries a card held by another process
+_SHARING_DELAY = 0.5
 
 _SW_OK = 0x9000
 _SW_EOF_WARNING = 0x6282  # end of file reached before reading Le bytes
@@ -103,6 +107,7 @@ _CARD_ABSENT_CODES = frozenset(
     code & _UINT32 for code in (SCARD_W_REMOVED_CARD, SCARD_E_NO_SMARTCARD)
 )
 _CARD_RESET_CODE = SCARD_W_RESET_CARD & _UINT32
+_SHARING_VIOLATION_CODE = SCARD_E_SHARING_VIOLATION & _UINT32
 
 
 class _Response(NamedTuple):
@@ -239,6 +244,7 @@ class CardReader:
         self._retry_delay = 0.0
         self._connection: Any = None
         self._card_info: CardInfo | None = None
+        self._in_use: CardInUseError | None = None
 
         available = _list_pcsc_readers()
         if not available:
@@ -286,6 +292,7 @@ class CardReader:
         if self._try_candidates(candidates, explicit=explicit):
             return
         if timeout is None:
+            self._raise_in_use()
             names = ", ".join(f"'{item}'" for item in candidates)
             msg = f"No Belgian eID card in reader {names}"
             raise NoCardError(msg)
@@ -293,17 +300,29 @@ class CardReader:
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
+                self._raise_in_use()
                 msg = f"No Belgian eID card inserted within {timeout:g} s"
                 raise NoCardError(msg)
             self._wait_for_insertion(candidates, min(remaining, _WAIT_STEP))
             if self._try_candidates(candidates, explicit=explicit):
                 return
 
+    def _raise_in_use(self) -> None:
+        """Report a card held by another application rather than "no card"."""
+        if self._in_use is not None:
+            raise self._in_use
+
     def _try_candidates(self, candidates: list[Any], *, explicit: bool) -> bool:
+        self._in_use = None
         for candidate in candidates:
             try:
                 self._connect(candidate)
             except NoCardError:
+                continue
+            except CardInUseError as exc:
+                if explicit:
+                    raise
+                self._in_use = exc
                 continue
             except BeidError:
                 if explicit:
@@ -314,6 +333,17 @@ class CardReader:
         return False
 
     def _connect(self, reader: Any) -> None:
+        for attempt in range(1, _SHARING_ATTEMPTS + 1):
+            try:
+                self._connect_once(reader)
+            except CardInUseError:
+                if attempt == _SHARING_ATTEMPTS:
+                    raise
+                time.sleep(_SHARING_DELAY)
+            else:
+                return
+
+    def _connect_once(self, reader: Any) -> None:
         try:
             connection = _wrap_connection(reader.createConnection())
             connection.connect(disposition=SCARD_LEAVE_CARD)
@@ -324,6 +354,12 @@ class CardReader:
             if _hresult(exc) in _CARD_ABSENT_CODES:
                 msg = f"No card in reader '{reader}'"
                 raise NoCardError(msg) from exc
+            if _hresult(exc) == _SHARING_VIOLATION_CODE:
+                msg = (
+                    f"The card in '{reader}' is used exclusively by another "
+                    "application (eID middleware, browser...); close it or retry"
+                )
+                raise CardInUseError(msg) from exc
             msg = f"Connection error on '{reader}': {exc}"
             raise CardCommunicationError(msg) from exc
         self._connection = connection
