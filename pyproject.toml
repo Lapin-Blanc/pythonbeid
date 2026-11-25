@@ -1,29 +1,133 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "pythonbeid"
-version = "0.3.0"
-description = "Un module pour lire les informations des cartes d'identité belges"
+version = "1.0.0"
+description = "Read and verify Belgian eID cards (identity, address, photo) through PC/SC"
 readme = "README.md"
 license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Fabien Toune", email = "fabien.toune@gmail.com" }]
-requires-python = ">=3.9"
-dependencies = ["pyscard"]
+requires-python = ">=3.11"
+dependencies = ["pyscard>=2.0.8"]
+keywords = ["belgium", "eid", "beid", "belpic", "smartcard", "pcsc", "identity card"]
 classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Natural Language :: English",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
-    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Topic :: Security",
+    "Topic :: Security :: Cryptography",
     "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Hardware",
+    "Typing :: Typed",
 ]
+
+[project.optional-dependencies]
+verify = ["cryptography>=42"]
+dev = [
+    "black>=25",
+    "build>=1.2",
+    "cryptography>=42",
+    "mypy>=1.13",
+    "pre-commit>=4",
+    "pytest>=8",
+    "pytest-cov>=6",
+    "ruff>=0.8",
+    "twine>=6",
+]
+
+[project.scripts]
+pythonbeid = "pythonbeid.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/Lapin-Blanc/pythonbeid"
-"Bug Tracker" = "https://github.com/Lapin-Blanc/pythonbeid/issues"
+Repository = "https://github.com/Lapin-Blanc/pythonbeid"
+Issues = "https://github.com/Lapin-Blanc/pythonbeid/issues"
+Changelog = "https://github.com/Lapin-Blanc/pythonbeid/blob/master/CHANGELOG.md"
 
-[project.optional-dependencies]
-dev = ["pytest", "pytest-cov", "build", "twine"]
+[tool.setuptools]
+packages = ["pythonbeid"]
+
+[tool.setuptools.package-data]
+pythonbeid = ["py.typed", "trust/*.pem"]
+
+# ── Formatting & linting ───────────────────────────────────────────────────
+
+[tool.black]
+line-length = 88
+target-version = ["py311"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E", "W", "F", "I", "B", "C4", "UP", "SIM", "RUF", "PT", "PIE", "RET",
+    "PL", "S", "BLE", "DTZ", "T20", "PERF", "FBT", "PTH", "TC", "N", "ISC",
+]
+ignore = [
+    "PLR2004",  # protocol constants (status words, offsets) are clearer inline
+    "PLR0913",  # dataclass-style constructors legitimately take many arguments
+    "S311",     # random is not used for cryptography
+]
+
+[tool.ruff.lint.per-file-ignores]
+"pythonbeid/cli.py" = ["T201"]  # printing is the job of a CLI
+"pythonbeid/integrity.py" = ["PLC0415"]  # cryptography is an optional dependency
+"tests/**" = [
+    "S101", "S105", "S106", "S303", "S324",  # asserts, fixtures, legacy SHA-1 cards
+    "FBT", "PLC0415", "PLR0911", "PLR0912", "PLR0915",
+    "E501",  # long parametrize tables are kept on one line (fmt: skip)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["pythonbeid"]
+
+# ── Type checking ──────────────────────────────────────────────────────────
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+files = ["pythonbeid", "tests"]
+
+[[tool.mypy.overrides]]
+module = ["smartcard", "smartcard.*"]
+ignore_missing_imports = true
+
+# ── Tests & coverage ───────────────────────────────────────────────────────
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+markers = ["hardware: needs a PC/SC reader with a Belgian eID card (run with --hardware)"]
+filterwarnings = ["error"]
+xfail_strict = true
+
+[tool.coverage.run]
+branch = true
+source = ["pythonbeid"]
+
+[tool.coverage.report]
+fail_under = 95
+show_missing = true
+skip_covered = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "@overload",
+]
