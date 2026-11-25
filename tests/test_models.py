@@ -53,7 +53,7 @@ class TestPartialDate:
             PartialDate(1990, month)
 
     def test_invalid_day(self) -> None:
-        with pytest.raises(ValueError, match="day is out of range"):
+        with pytest.raises(ValueError, match="day"):  # wording varies by Python version
             PartialDate(1990, 2, 30)
 
     def test_frozen(self) -> None:
